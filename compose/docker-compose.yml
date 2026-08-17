@@ -1,0 +1,201 @@
+# ---------------------------------------------------------------------------
+# Reference environment — LocalAI + LocalAGI + LocalRecall, separated services.
+#
+# This is deployment Pattern B: every logical layer is its own process, so every
+# integration edge is a real network call you can observe, break and diagnose.
+# That is the point of this environment. It is NOT the smallest way to run the
+# stack — for that, run the single LocalAI container (Pattern A) and see
+# docs/06-deployment/docker.md.
+#
+# Every service below has an architectural justification. Nothing is here
+# because it is conventional:
+#
+#   localai      the model runtime. Executes the LLM and the embedding model.
+#                Nothing else in this file can work without it.
+#   localrecall  the knowledge layer as a service, so retrieval can be probed
+#                independently of the agent. Embedded in localagi by default;
+#                separated here deliberately.
+#   localagi     the agent runtime. Owns the agent loop, tools and agent state.
+#   postgres     the vector store. Justified ONLY by hybrid search: BM25 scoring
+#                is implemented exclusively in LocalRecall's postgres engine and
+#                requires the pg_textsearch extension. Drop this service and set
+#                VECTOR_ENGINE=chromem if you do not need lexical matching.
+#
+# Verify with:  ../scripts/verify-stack.sh
+# ---------------------------------------------------------------------------
+
+name: localai-stack
+
+services:
+
+  # -------------------------------------------------------------------------
+  # Model runtime. Positional arguments are models to install at startup;
+  # the first start downloads them (~1.4 GiB) plus a backend, so the initial
+  # healthcheck window is deliberately long.
+  # -------------------------------------------------------------------------
+  localai:
+    image: localai/localai:${LOCALAI_VERSION:-v4.8.2}
+    container_name: localai
+    command:
+      - ${LLM_MODEL:-qwen3-1.7b}
+      - ${EMBEDDING_MODEL:-granite-embedding-107m-multilingual}
+    environment:
+      # The agent pool is enabled by default and would give us a SECOND agent
+      # runtime alongside the localagi service below. Two pools competing for
+      # one state directory lose agents. In Pattern B, disable it here.
+      - LOCALAI_DISABLE_AGENTS=${LOCALAI_DISABLE_AGENTS:-true}
+      - DEBUG=${DEBUG:-false}
+      # Uncomment to require a bearer token on inbound requests. If you set it,
+      # you MUST also set LOCALAGI_LLM_API_KEY and LOCALRECALL_OPENAI_API_KEY to
+      # the same value — each hop authenticates independently.
+      # - LOCALAI_API_KEY=${LOCALAI_API_KEY}
+    ports:
+      - "${LOCALAI_PORT:-8080}:8080"
+    volumes:
+      - localai-models:/models
+      - localai-backends:/backends
+      - localai-configuration:/configuration
+    healthcheck:
+      # /readyz reports that the HTTP listener is up. It does NOT report that a
+      # model is loaded — the first inference request still pays the load cost.
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 15s
+      timeout: 10s
+      # 120 retries x 15s = 30 minutes, for the initial model download.
+      retries: 120
+      start_period: 30s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Vector store. This image is LocalRecall's own PostgreSQL build because it
+  # ships pgvector AND pg_textsearch; plain postgres:* images do not, and
+  # LocalRecall's schema initialisation fails without pg_textsearch.
+  # Tag v0.6.4-postgresql verified present on quay.io 2026-08-17.
+  # -------------------------------------------------------------------------
+  postgres:
+    image: quay.io/mudler/localrecall:${LOCALRECALL_VERSION:-v0.6.4}-postgresql
+    container_name: localai-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-localrecall}
+      - POSTGRES_USER=${POSTGRES_USER:-localrecall}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-localrecall}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-localrecall}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # Not published by default. Uncomment only if you want to inspect the
+    # vectors with psql from the host.
+    # ports:
+    #   - "5432:5432"
+
+  # -------------------------------------------------------------------------
+  # Knowledge layer. Calls localai for embeddings — it computes none itself.
+  #
+  # No healthcheck: this image is built FROM scratch and contains no shell,
+  # curl or wget, so a Docker CMD healthcheck cannot run inside it. There is
+  # also no /health endpoint. Probe it from outside with
+  # `GET /api/collections` — which answers from disk and therefore proves the
+  # process is up but proves nothing about the embeddings edge.
+  # -------------------------------------------------------------------------
+  localrecall:
+    image: quay.io/mudler/localrecall:${LOCALRECALL_VERSION:-v0.6.4}
+    container_name: localrecall
+    depends_on:
+      localai:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      # Mandatory in practice. main.go overwrites go-openai's default base URL
+      # unconditionally, so an empty value produces a bare relative
+      # "/embeddings" and every embedding call fails — with no startup error.
+      - OPENAI_BASE_URL=http://localai:8080
+      - OPENAI_API_KEY=${LOCALRECALL_OPENAI_API_KEY:-}
+      # No default in LocalRecall. Unset means an empty model name on the wire.
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-granite-embedding-107m-multilingual}
+      - VECTOR_ENGINE=${VECTOR_ENGINE:-postgres}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-localrecall}:${POSTGRES_PASSWORD:-localrecall}@postgres:5432/${POSTGRES_DB:-localrecall}?sslmode=disable
+      # Defaults are relative to the working directory, which in a scratch
+      # image means the ephemeral container layer. Always set them explicitly.
+      - COLLECTION_DB_PATH=/data/collections
+      - FILE_ASSETS=/data/assets
+      - LISTENING_ADDRESS=:8080
+      - MAX_CHUNKING_SIZE=${MAX_CHUNKING_SIZE:-400}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-80}
+      # Hybrid search weights. Only meaningful with VECTOR_ENGINE=postgres.
+      - HYBRID_SEARCH_VECTOR_WEIGHT=${HYBRID_SEARCH_VECTOR_WEIGHT:-0.5}
+      - HYBRID_SEARCH_BM25_WEIGHT=${HYBRID_SEARCH_BM25_WEIGHT:-0.5}
+      - BM25_TEXT_CONFIG=${BM25_TEXT_CONFIG:-english}
+      # - API_KEYS=${LOCALRECALL_API_KEYS}
+    ports:
+      - "${LOCALRECALL_PORT:-8082}:8080"
+    volumes:
+      # Holds the original uploaded files. The vectors live in PostgreSQL, so
+      # BOTH must be backed up: losing this volume leaves searchable chunks
+      # whose raw-file endpoints 404.
+      - localrecall-data:/data
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Agent runtime. Listens on 3000 inside the container — the address is
+  # hardcoded in cmd/serve.go and there is no variable to change it.
+  #
+  # Image tag is v2.8.1, not v2.9.0: quay.io/mudler/localagi:v2.9.0 does not
+  # exist. Verified against the quay tag list 2026-08-17.
+  # -------------------------------------------------------------------------
+  localagi:
+    image: quay.io/mudler/localagi:${LOCALAGI_VERSION:-v2.8.1}
+    container_name: localagi
+    depends_on:
+      localai:
+        condition: service_healthy
+      localrecall:
+        # service_started, not service_healthy — see the localrecall note above.
+        condition: service_started
+    environment:
+      # No /v1 suffix needed against LocalAI, which registers un-prefixed
+      # aliases. Against any OTHER OpenAI-compatible server, /v1 is mandatory:
+      # cogito concatenates "/chat/completions" without inserting a version.
+      - LOCALAGI_LLM_API_URL=http://localai:8080
+      - LOCALAGI_LLM_API_KEY=${LOCALAGI_LLM_API_KEY:-}
+      - LOCALAGI_MODEL=${LLM_MODEL:-qwen3-1.7b}
+      # Agent definitions live here as JSON. Lose this volume, lose every agent.
+      - LOCALAGI_STATE_DIR=/pool
+      # Flips BOTH the agent's retrieval provider and the /api/collections
+      # backend from in-process to HTTP. Comment it out to embed LocalRecall in
+      # this process instead — and then the localrecall service is unused.
+      - LOCALAGI_LOCALRAG_URL=http://localrecall:8080
+      # Per-model-call timeout, not per-agent-request. One agent request is a
+      # loop and may take a multiple of this.
+      - LOCALAGI_TIMEOUT=${LOCALAGI_TIMEOUT:-5m}
+      # In-memory conversation TTL for previous_response_id. Falls back to 1h
+      # if unparseable. Nothing is persisted either way.
+      - LOCALAGI_CONVERSATION_DURATION=${LOCALAGI_CONVERSATION_DURATION:-1h}
+      - LOCALAGI_ENABLE_CONVERSATIONS_LOGGING=${LOCALAGI_ENABLE_CONVERSATIONS_LOGGING:-false}
+      # - LOCALAGI_API_KEYS=${LOCALAGI_API_KEYS}
+    ports:
+      - "${LOCALAGI_PORT:-8081}:3000"
+    volumes:
+      - localagi-pool:/pool
+    healthcheck:
+      # LocalAGI has no /health endpoint either. /api/agents returns JSON and
+      # is the cheapest liveness proof. Note: if LOCALAGI_API_KEYS is set this
+      # returns 401 and curl -f fails — add the header or drop the healthcheck.
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/agents"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  localai-models:
+  localai-backends:
+  localai-configuration:
+  localagi-pool:
+  localrecall-data:
+  postgres-data:

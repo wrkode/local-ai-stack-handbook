@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localagi-pool
+  namespace: localai-stack
+spec:
+  # ReadWriteOnce DELIBERATELY. Agent definitions are JSON on disk with no
+  # locking; a ReadWriteMany claim invites two replicas to rewrite one inventory
+  # and lose agents. Making it RWO makes the unsafe configuration hard to build.
+  accessModes: ["ReadWriteOnce"]
+  # Observed: 6.1 kB for four agents. Tiny — and irreplaceable. Back it up.
+  # It also holds MCP tokens and connector credentials in PLAIN TEXT.
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localagi
+  namespace: localai-stack
+spec:
+  selector:
+    app: localagi
+  ports:
+    # LocalAGI listens on 3000 INSIDE the container. Hardcoded in cmd/serve.go;
+    # no environment variable changes it.
+    - port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localagi
+  namespace: localai-stack
+spec:
+  # MUST stay 1. Agent state is a file with no locking, and scheduled or
+  # connector-driven agents fire once PER REPLICA — duplicating side effects
+  # rather than distributing work. See docs/07-deep-dives/scaling.md.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: two pods would briefly share the RWO volume's
+    # node and, on some storage classes, both mount it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: localagi
+  template:
+    metadata:
+      labels:
+        app: localagi
+    spec:
+      containers:
+        - name: localagi
+          image: quay.io/mudler/localagi:v2.8.1
+          ports:
+            - containerPort: 3000
+          env:
+            # No /v1 against LocalAI, which registers un-prefixed aliases.
+            # Against ANY other OpenAI-compatible server /v1 is mandatory:
+            # cogito concatenates "/chat/completions" without inserting one.
+            - name: LOCALAGI_LLM_API_URL
+              value: "http://localai:8080"
+            - name: LOCALAGI_LLM_API_KEY
+              valueFrom:
+                secretKeyRef: { name: localai-stack-secrets, key: LOCALAGI_LLM_API_KEY }
+            - name: LOCALAGI_MODEL
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: LLM_MODEL }
+            - name: LOCALAGI_STATE_DIR
+              value: "/pool"
+            # REQUIRED on v2.8.1: that version has no in-process knowledge layer
+            # at all, so without this the agent has no knowledge.
+            - name: LOCALAGI_LOCALRAG_URL
+              value: "http://localrecall:8080"
+            - name: LOCALAGI_TIMEOUT
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: LOCALAGI_TIMEOUT }
+            - name: LOCALAGI_CONVERSATION_DURATION
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: LOCALAGI_CONVERSATION_DURATION }
+            - name: LOCALAGI_API_KEYS
+              valueFrom:
+                secretKeyRef: { name: localai-stack-secrets, key: LOCALAGI_API_KEYS }
+          volumeMounts:
+            - { name: pool, mountPath: /pool }
+          # LocalAGI has no health endpoint; /api/agents is the cheapest liveness
+          # proof. NOTE: with LOCALAGI_API_KEYS set, auth is GLOBAL and this
+          # returns 401 — hence the header below. Remove it if you run without
+          # authentication.
+          readinessProbe:
+            httpGet:
+              path: /api/agents
+              port: 3000
+              httpHeaders:
+                - name: Authorization
+                  value: "Bearer REPLACE-ME"
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /api/agents
+              port: 3000
+              httpHeaders:
+                - name: Authorization
+                  value: "Bearer REPLACE-ME"
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { memory: "1Gi" }
+      volumes:
+        - name: pool
+          persistentVolumeClaim: { claimName: localagi-pool }

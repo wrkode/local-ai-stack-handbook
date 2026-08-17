@@ -1,0 +1,215 @@
+site_name: LocalAI Stack Handbook
+site_description: >-
+  An independent field manual for LocalAI, LocalAGI and LocalRecall —
+  architecture, integration, deployment and troubleshooting.
+site_url: https://wrkode.github.io/local-ai-stack-handbook/
+repo_url: https://github.com/wrkode/local-ai-stack-handbook
+repo_name: wrkode/local-ai-stack-handbook
+edit_uri: edit/main/docs/
+copyright: >-
+  Apache 2.0. Not affiliated with the LocalAI, LocalAGI or LocalRecall projects.
+
+docs_dir: docs
+
+# The handbook is plain Markdown first. MkDocs adds navigation, search and
+# rendered Mermaid; nothing here is required to read the repository on GitHub.
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - navigation.indexes
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - search.highlight
+    - search.suggest
+  palette:
+    # Deliberately plain. This should read like an engineering manual, not a
+    # product site.
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Follow system theme
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+extra_css:
+  - assets/handbook.css
+
+plugins:
+  - search
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # Deep enough for reference pages, shallow enough that the sidebar stays
+      # usable on long architecture pages.
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.smartsymbols
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  # Renders ```mermaid fences client-side. GitHub renders the same fences
+  # natively, so diagrams work in both places without duplication.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/wrkode/local-ai-stack-handbook
+      name: Handbook repository
+    - icon: fontawesome/brands/github
+      link: https://github.com/mudler/LocalAI
+      name: LocalAI upstream
+  generator: false
+
+# Fail the build on ambiguous or unresolvable internal links rather than
+# emitting a broken site. CI runs `mkdocs build --strict`.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+# Explicit nav rather than inferred: the reading order matters here, and the
+# numbered directory prefixes should not leak into the sidebar labels.
+nav:
+  - Home: index.md
+
+  - Overview:
+      - Ecosystem: 00-overview/ecosystem.md
+      - Architecture: 00-overview/architecture.md
+      - Logical vs physical: 00-overview/logical-vs-physical.md
+      - Terminology: 00-overview/terminology.md
+      - Project boundaries: 00-overview/project-boundaries.md
+      - Version matrix: 00-overview/version-matrix.md
+
+  - LocalAI:
+      - Overview: 01-localai/overview.md
+      - Architecture: 01-localai/architecture.md
+      - Installation: 01-localai/installation.md
+      - Configuration: 01-localai/configuration.md
+      - Models: 01-localai/models.md
+      - Backends: 01-localai/backends.md
+      - API: 01-localai/api.md
+      - Embeddings: 01-localai/embeddings.md
+      - GPU: 01-localai/gpu.md
+      - Troubleshooting: 01-localai/troubleshooting.md
+
+  - LocalAGI:
+      - Overview: 02-localagi/overview.md
+      - Architecture: 02-localagi/architecture.md
+      - Installation: 02-localagi/installation.md
+      - Agents: 02-localagi/agents.md
+      - The agent loop: 02-localagi/agent-loop.md
+      - Tools: 02-localagi/tools.md
+      - MCP: 02-localagi/mcp.md
+      - Skills: 02-localagi/skills.md
+      - State: 02-localagi/state.md
+      - Memory: 02-localagi/memory.md
+      - Responses API: 02-localagi/responses-api.md
+      - Troubleshooting: 02-localagi/troubleshooting.md
+
+  - LocalRecall:
+      - Overview: 03-localrecall/overview.md
+      - Architecture: 03-localrecall/architecture.md
+      - Installation: 03-localrecall/installation.md
+      - Collections: 03-localrecall/collections.md
+      - Ingestion: 03-localrecall/ingestion.md
+      - Chunking: 03-localrecall/chunking.md
+      - Embeddings: 03-localrecall/embeddings.md
+      - Retrieval: 03-localrecall/retrieval.md
+      - Storage: 03-localrecall/storage.md
+      - RAG: 03-localrecall/rag.md
+      - Troubleshooting: 03-localrecall/troubleshooting.md
+
+  - Integration:
+      - Overview: 04-integration/overview.md
+      - LocalAI and LocalAGI: 04-integration/localai-localagi.md
+      - LocalAI and LocalRecall: 04-integration/localai-localrecall.md
+      - LocalAGI and LocalRecall: 04-integration/localagi-localrecall.md
+      - The complete stack: 04-integration/complete-stack.md
+      - Data flow: 04-integration/data-flow.md
+      - API flow and request tracing: 04-integration/api-flow.md
+      - Deployment patterns: 04-integration/deployment-patterns.md
+
+  - Recipes:
+      - Overview: 05-recipes/index.md
+      - 1. LocalAI inference: 05-recipes/localai-chat.md
+      - 2. Embeddings: 05-recipes/localai-embeddings.md
+      - 3. LocalRecall RAG: 05-recipes/localrecall-rag.md
+      - 4. A simple agent: 05-recipes/simple-agent.md
+      - 5. An agent with a tool: 05-recipes/agent-with-tools.md
+      - 6. An agent with knowledge: 05-recipes/agent-with-knowledge.md
+      - 7. An MCP agent: 05-recipes/mcp-agent.md
+      - 8. The complete stack: 05-recipes/complete-agent-stack.md
+      - 9. Multi-agent delegation: 05-recipes/multi-agent.md
+
+  - Deployment:
+      - Overview: 06-deployment/overview.md
+      - Docker: 06-deployment/docker.md
+      - Docker Compose: 06-deployment/docker-compose.md
+      - Persistence: 06-deployment/persistence.md
+      - GPU: 06-deployment/gpu.md
+      - Kubernetes: 06-deployment/kubernetes.md
+      - Security: 06-deployment/security.md
+      - Observability: 06-deployment/observability.md
+      - Production: 06-deployment/production.md
+
+  - Deep dives:
+      - Memory vs knowledge: 07-deep-dives/memory-vs-knowledge.md
+      - Responses vs Chat Completions: 07-deep-dives/responses-vs-chat-completions.md
+      - The security model: 07-deep-dives/security-model.md
+      - Scaling: 07-deep-dives/scaling.md
+
+  - Reference:
+      - API map: 08-reference/api-map.md
+      - Configuration map: 08-reference/configuration-map.md
+      - Environment variables: 08-reference/environment-variables.md
+      - Ports: 08-reference/ports.md
+      - Storage map: 08-reference/storage-map.md
+      - Source map: 08-reference/source-map.md
+      - Glossary: 08-reference/glossary.md

@@ -1,0 +1,29 @@
+# Only LocalAGI is exposed. LocalAI, LocalRecall and PostgreSQL stay internal:
+# publishing LocalRecall grants unauthenticated READ AND WRITE access to your
+# collections, including the ability to poison an agent's memory.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: localagi
+  namespace: localai-stack
+  annotations:
+    # The default 60s is SHORTER than a real agent request. Measured on CPU:
+    # 38.7 s for one tool call across three model calls. When the default fires,
+    # the client gets a 504 while the agent runs to completion and COMMITS its
+    # tool side effects.
+    #
+    # Order the three timeouts: client > ingress > LOCALAGI_TIMEOUT (per call).
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+spec:
+  rules:
+    - host: agents.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: localagi
+                port:
+                  number: 3000

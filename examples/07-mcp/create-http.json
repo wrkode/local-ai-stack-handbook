@@ -1,0 +1,13 @@
+{
+  "name": "example-mcp",
+  "model": "qwen3-1.7b",
+  "system_prompt": "You use external tools when asked. Be terse.",
+  "strip_thinking_tags": true,
+  "max_attempts": 1,
+  "mcp_servers": [
+    {
+      "url": "http://REPLACE-ME:9090",
+      "token": "REPLACE-ME"
+    }
+  ]
+}

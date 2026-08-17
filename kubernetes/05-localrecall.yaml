@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localrecall-data
+  namespace: localai-stack
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Holds the ORIGINAL uploaded documents. The chunks and vectors live in
+  # PostgreSQL. Back BOTH up or neither: restoring only the database leaves
+  # searchable chunks whose /raw endpoints 404.
+  resources: { requests: { storage: 10Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localrecall
+  namespace: localai-stack
+spec:
+  selector:
+    app: localrecall
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localrecall
+  namespace: localai-stack
+spec:
+  # Safe to scale ONLY because the store is PostgreSQL. With VECTOR_ENGINE=chromem
+  # the store is a single file opened by one process — keep it at 1.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localrecall
+  template:
+    metadata:
+      labels:
+        app: localrecall
+    spec:
+      containers:
+        - name: localrecall
+          image: quay.io/mudler/localrecall:v0.6.4
+          ports:
+            - containerPort: 8080
+          env:
+            # Effectively mandatory. main.go overwrites the OpenAI client's
+            # default base URL unconditionally, so an empty value yields a bare
+            # relative /embeddings and every call fails — with no startup error.
+            # No /v1 here: this client appends the OpenAI path itself.
+            - name: OPENAI_BASE_URL
+              value: "http://localai:8080"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: localai-stack-secrets, key: LOCALRECALL_OPENAI_API_KEY }
+            # No default in LocalRecall at all. Unset means an empty model name
+            # on the wire.
+            - name: EMBEDDING_MODEL
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: EMBEDDING_MODEL }
+            - name: VECTOR_ENGINE
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: VECTOR_ENGINE }
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: localai-stack-secrets, key: DATABASE_URL }
+            - name: COLLECTION_DB_PATH
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: COLLECTION_DB_PATH }
+            - name: FILE_ASSETS
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: FILE_ASSETS }
+            - name: LISTENING_ADDRESS
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: LISTENING_ADDRESS }
+            - name: MAX_CHUNKING_SIZE
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: MAX_CHUNKING_SIZE }
+            - name: CHUNK_OVERLAP
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: CHUNK_OVERLAP }
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef: { name: localai-stack-secrets, key: LOCALRECALL_API_KEYS }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          # httpGet only: this image is built FROM scratch and has no shell, so
+          # an exec probe cannot run. Note that /api/collections answers from
+          # DISK — it proves liveness and nothing about the embeddings edge.
+          readinessProbe:
+            httpGet: { path: /api/collections, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 10
+          livenessProbe:
+            httpGet: { path: /api/collections, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: "250m", memory: "256Mi" }
+            limits: { memory: "1Gi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: localrecall-data }

@@ -1,0 +1,79 @@
+# StatefulSet, not Deployment: stable identity and a per-replica volume.
+#
+# This image is LocalRecall's own PostgreSQL build because it ships pgvector AND
+# pg_textsearch. Plain postgres:* images do not, and LocalRecall's schema
+# initialisation FAILS without pg_textsearch. Observed extensions in this image:
+# plpgsql, pg_textsearch, vector, vectorscale.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: localai-stack
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: localai-stack
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: quay.io/mudler/localrecall:v0.6.4-postgresql
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: POSTGRES_DB }
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: localai-stack-secrets, key: POSTGRES_PASSWORD }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { memory: "2Gi" }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            # Observed baseline: 66 MB for a SINGLE 207-byte document. That is
+            # the database's floor, not your data — do not extrapolate from a
+            # small collection.
+            storage: 20Gi

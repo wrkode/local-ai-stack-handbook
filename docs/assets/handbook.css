@@ -1,0 +1,99 @@
+/* Minimal typographic adjustments. This should read like an engineering
+   manual: dense tables, legible code, no decoration. Material's defaults do
+   most of the work; everything here fixes a specific readability problem. */
+
+:root {
+  /* Material's default content column is tuned for prose. The reference and
+     API-map pages are wide tables; give them room without going full-width. */
+  --md-content-max-width: 52rem;
+}
+
+.md-grid {
+  max-width: 66rem;
+}
+
+/* Tables carry a lot of this handbook's meaning (ownership, ports, env vars,
+   API maps). Make them scannable and stop them overflowing the page. */
+.md-typeset table:not([class]) {
+  font-size: 0.72rem;
+  display: block;
+  overflow-x: auto;
+  white-space: normal;
+}
+
+.md-typeset table:not([class]) th {
+  white-space: nowrap;
+}
+
+/* Keep short identifier cells (ports, env vars, paths) on one line. */
+.md-typeset table:not([class]) td code {
+  white-space: nowrap;
+}
+
+/* Code blocks are read closely and often long. Slightly tighter leading. */
+.md-typeset pre > code {
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.md-typeset code {
+  font-size: 0.78em;
+}
+
+/* Mermaid diagrams: centre them and give breathing room, and let wide ones
+   scroll rather than shrink to illegibility. */
+.md-typeset .mermaid {
+  margin: 1.4em 0;
+  overflow-x: auto;
+  text-align: center;
+}
+
+/* ASCII architecture sketches live in `text` fences. Prevent wrapping, which
+   would destroy the alignment. */
+.md-typeset pre > code.language-text {
+  white-space: pre;
+}
+
+/* Evidence-tier callouts. Used sparingly, where a claim's provenance is the
+   point rather than a footnote. */
+.md-typeset .admonition.verified,
+.md-typeset details.verified {
+  border-color: #2e7d32;
+}
+.md-typeset .verified > .admonition-title,
+.md-typeset .verified > summary {
+  background-color: rgba(46, 125, 50, 0.1);
+}
+.md-typeset .verified > .admonition-title::before,
+.md-typeset .verified > summary::before {
+  background-color: #2e7d32;
+  -webkit-mask-image: var(--md-admonition-icon--success);
+  mask-image: var(--md-admonition-icon--success);
+}
+
+.md-typeset .admonition.unverified,
+.md-typeset details.unverified {
+  border-color: #ef6c00;
+}
+.md-typeset .unverified > .admonition-title,
+.md-typeset .unverified > summary {
+  background-color: rgba(239, 108, 0, 0.1);
+}
+.md-typeset .unverified > .admonition-title::before,
+.md-typeset .unverified > summary::before {
+  background-color: #ef6c00;
+  -webkit-mask-image: var(--md-admonition-icon--warning);
+  mask-image: var(--md-admonition-icon--warning);
+}
+
+/* Headings: reduce the size jump so long reference pages stay navigable. */
+.md-typeset h1 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.md-typeset h2 {
+  font-weight: 600;
+  margin-top: 1.8em;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  padding-bottom: 0.2em;
+}

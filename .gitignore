@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# Claude Code / AI assistant tooling — NEVER committed.
+# This repository is authored with assistance from local agent tooling.
+# That tooling is a private authoring concern and is not part of the handbook.
+# ---------------------------------------------------------------------------
+.claude/
+CLAUDE.md
+AGENTS.md
+.cursor/
+.cursorrules
+.aider*
+.github/copilot-instructions.md
+.mcp.json
+.claude.json
+
+# ---------------------------------------------------------------------------
+# MkDocs
+# ---------------------------------------------------------------------------
+site/
+.cache/
+docs/**/.pages.local
+
+# ---------------------------------------------------------------------------
+# Python (docs toolchain)
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.python-version
+
+# ---------------------------------------------------------------------------
+# Local runtime state produced by the examples / reference environments.
+# These directories hold models, vector stores and agent state. They are
+# large, machine-specific and must never be committed.
+# ---------------------------------------------------------------------------
+compose/**/.env
+examples/**/.env
+**/models/
+**/backends/
+**/state/
+**/collections/
+**/localrecall-data/
+**/pgdata/
+!examples/**/models/.gitkeep
+
+# ---------------------------------------------------------------------------
+# Scratch / captured output
+# ---------------------------------------------------------------------------
+scratch/
+tmp/
+*.log
+*.tmp
+capture/
+*.pcap
+
+# ---------------------------------------------------------------------------
+# OS / editor
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

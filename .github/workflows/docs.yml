@@ -1,0 +1,66 @@
+name: docs
+
+# Builds the MkDocs site and publishes it to GitHub Pages.
+#
+# GitHub Pages is optional. The handbook is fully usable as plain Markdown in
+# the repository; this workflow only produces the rendered site. If Pages is not
+# enabled for the repository, the `build` job still runs on every push and pull
+# request and acts as a correctness check (strict mode fails on broken internal
+# links and missing nav entries). The `deploy` job is skipped unless Pages is
+# configured.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install documentation toolchain
+        run: pip install -r requirements-docs.txt
+
+      # --strict turns MkDocs warnings into errors: unresolved internal links,
+      # files missing from the nav, and bad references all fail the build.
+      - name: Build site (strict)
+        run: mkdocs build --strict --site-dir site
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    # Only attempts to deploy from main. Requires Pages to be enabled with
+    # "GitHub Actions" as the source in repository settings.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

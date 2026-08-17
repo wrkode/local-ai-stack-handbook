@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localai-stack-config
+  namespace: localai-stack
+data:
+  # Image tags. LocalAGI is v2.8.1, NOT v2.9.0: that image does not exist, and
+  # v2.8.1 differs architecturally — no in-process knowledge layer, which is why
+  # LOCALAGI_LOCALRAG_URL below is required rather than optional.
+  LOCALAI_IMAGE: "localai/localai:v4.8.2"
+  LOCALAGI_IMAGE: "quay.io/mudler/localagi:v2.8.1"
+  LOCALRECALL_IMAGE: "quay.io/mudler/localrecall:v0.6.4"
+  POSTGRES_IMAGE: "quay.io/mudler/localrecall:v0.6.4-postgresql"
+
+  LLM_MODEL: "qwen3-1.7b"
+  EMBEDDING_MODEL: "granite-embedding-107m-multilingual"
+
+  # We run a standalone LocalAGI, so LocalAI's own agent pool must be off.
+  # Two pools sharing state lose agents.
+  LOCALAI_DISABLE_AGENTS: "true"
+
+  # postgres, because BM25 hybrid search exists only in that engine.
+  VECTOR_ENGINE: "postgres"
+
+  # Characters, not tokens. Upstream defaults are 400/0; a non-zero overlap
+  # stops sentences being cut at chunk boundaries.
+  MAX_CHUNKING_SIZE: "400"
+  CHUNK_OVERLAP: "80"
+
+  # Defaults are relative to the working directory, which in LocalRecall's
+  # FROM-scratch image is the ephemeral container layer. Always set these.
+  COLLECTION_DB_PATH: "/data/collections"
+  FILE_ASSETS: "/data/assets"
+  LISTENING_ADDRESS: ":8080"
+
+  # Per MODEL CALL, not per request. An agent request is a loop.
+  LOCALAGI_TIMEOUT: "5m"
+  LOCALAGI_CONVERSATION_DURATION: "1h"
+
+  POSTGRES_DB: "localrecall"
+  POSTGRES_USER: "localrecall"

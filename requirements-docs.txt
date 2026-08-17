@@ -1,0 +1,20 @@
+# Documentation toolchain for the LocalAI Stack Handbook.
+#
+#   python3 -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements-docs.txt
+#   mkdocs serve
+#
+# The handbook is readable as plain Markdown without any of this. MkDocs only
+# adds navigation, search and client-side Mermaid rendering.
+#
+# Pinned so that a build in CI and a build on a workstation produce the same
+# site. Each pin below was installed and used to build the site successfully on
+# 2026-08-17; do not bump one without rebuilding.
+
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+pymdown-extensions==10.21.3
+mkdocs-material-extensions==1.3.1
+
+# Internal link checking in CI (see .github/workflows/docs.yml).
+linkchecker==10.6.0

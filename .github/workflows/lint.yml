@@ -1,0 +1,95 @@
+name: lint
+
+# Structural checks only. These verify that the repository's own artifacts are
+# well-formed; they do not test the LocalAI stack itself and must never be
+# presented as integration tests.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # Every tracked shell script must parse and pass shellcheck.
+          mapfile -t files < <(git ls-files '*.sh')
+          if [ ${#files[@]} -eq 0 ]; then echo "no shell scripts"; exit 0; fi
+          printf '%s\n' "${files[@]}"
+          shellcheck -S warning "${files[@]}"
+
+  yaml:
+    name: yaml syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: parse all YAML
+        run: |
+          pip install --quiet ruamel.yaml
+          python3 - <<'PY'
+          import sys, pathlib
+          from ruamel.yaml import YAML
+          # round-trip loader tolerates the merge keys and anchors used in
+          # the compose files; pure yaml.safe_load does not.
+          yaml = YAML(typ="rt")
+          bad = []
+          for p in sorted(pathlib.Path(".").rglob("*.y*ml")):
+              if any(part in {".git", "site", ".venv"} for part in p.parts):
+                  continue
+              # mkdocs.yml uses python-object tags from pymdownx; skip it here,
+              # `mkdocs build --strict` in the docs workflow validates it.
+              if p.name == "mkdocs.yml":
+                  continue
+              try:
+                  list(yaml.load_all(p.read_text()))
+              except Exception as e:
+                  bad.append(f"{p}: {e}")
+          print("\n".join(bad) if bad else "all YAML parsed")
+          sys.exit(1 if bad else 0)
+          PY
+
+  compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate compose files
+        run: |
+          shopt -s nullglob
+          found=0
+          for f in compose/*/compose.yaml compose/*/docker-compose.yml examples/*/compose.yaml; do
+            found=1
+            echo "::group::$f"
+            dir=$(dirname "$f")
+            # Compose interpolates ${VARS}; seed them from the example env so
+            # `config` does not fail on unset variables.
+            if [ -f "$dir/.env.example" ]; then cp "$dir/.env.example" "$dir/.env"; fi
+            docker compose -f "$f" config --quiet
+            rm -f "$dir/.env"
+            echo "::endgroup::"
+          done
+          [ "$found" -eq 1 ] || echo "no compose files yet"
+
+  markdown:
+    name: markdown links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: check internal links
+        run: python3 scripts/check-links.py

@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localai-models
+  namespace: localai-stack
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Observed: 1.503 GB for two small models. Real models are far larger.
+  resources: { requests: { storage: 20Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localai-backends
+  namespace: localai-stack
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Observed: 160 MB for llama-cpp. Without this, backends re-download on every
+  # pod recreation.
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localai
+  namespace: localai-stack
+spec:
+  selector:
+    app: localai
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localai
+  namespace: localai-stack
+spec:
+  # Stateless per request, so replicas are safe in principle — but bounded by
+  # GPU count and by model memory. See docs/07-deep-dives/scaling.md.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localai
+  strategy:
+    rollingUpdate:
+      # With a GPU there is one device per pod, so a surging update DEADLOCKS:
+      # the new pod waits for a device the old pod holds. Keep maxSurge 0 when
+      # the GPU stanza below is enabled.
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: localai
+    spec:
+      containers:
+        - name: localai
+          image: localai/localai:v4.8.2
+          # Positional arguments are gallery names installed at startup.
+          args: ["qwen3-1.7b", "granite-embedding-107m-multilingual"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LOCALAI_DISABLE_AGENTS
+              valueFrom:
+                configMapKeyRef: { name: localai-stack-config, key: LOCALAI_DISABLE_AGENTS }
+            - name: LOCALAI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: localai-stack-secrets, key: LOCALAI_API_KEY }
+          volumeMounts:
+            - { name: models, mountPath: /models }
+            - { name: backends, mountPath: /backends }
+          # /readyz reports the LISTENER, not models. Reproduced: with the model
+          # gallery rate-limited, both installs failed and /readyz still returned
+          # 200 with ZERO models. So: /readyz for liveness, /v1/models for
+          # readiness.
+          livenessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'curl -sf http://localhost:8080/v1/models | grep -q ''"id"'''
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            # 120 x 15s = 30 minutes for the first model download. Lower this
+            # and Kubernetes kills the pod mid-download, forever.
+            failureThreshold: 120
+          resources:
+            requests: { cpu: "2", memory: "4Gi" }
+            # No CPU limit: on CPU inference a limit throttles token generation
+            # directly.
+            limits: { memory: "8Gi" }
+          # --- GPU: uncomment, and switch the image tag above to a -gpu- variant
+          # resources:
+          #   limits:
+          #     nvidia.com/gpu: 1
+      # nodeSelector:
+      #   nvidia.com/gpu.present: "true"
+      volumes:
+        - name: models
+          persistentVolumeClaim: { claimName: localai-models }
+        - name: backends
+          persistentVolumeClaim: { claimName: localai-backends }
