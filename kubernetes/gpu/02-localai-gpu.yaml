@@ -1,0 +1,38 @@
+# GPU patch for the localai Deployment in ../04-localai.yaml.
+#
+#   kubectl -n localai-stack patch deployment localai --patch-file 02-localai-gpu.yaml
+#
+# Three things change together, and all three are required:
+#   1. the image tag gains a -gpu- variant
+#   2. the pod asks for a device AND declares runtimeClassName
+#   3. it is pinned to a GPU node
+#
+# maxSurge: 0 is not a typo. A GPU is non-overcommittable, so with one device and
+# one replica a surging update DEADLOCKS: the new pod waits for a device the old
+# pod still holds.
+#
+# NOTE: after switching to a GPU image you must ALSO discard the backends volume,
+# or LocalAI keeps using the CPU backend it installed earlier:
+#   kubectl -n localai-stack delete pvc localai-backends   # after scaling to 0
+# The backend variant is chosen by hardware detection at model-install time and
+# then persists. See docs/07-deep-dives/model-runtime-abstraction.md.
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: localai
+          image: localai/localai:v4.8.2-gpu-nvidia-cuda-12
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              memory: "16Gi"
+              nvidia.com/gpu: 1

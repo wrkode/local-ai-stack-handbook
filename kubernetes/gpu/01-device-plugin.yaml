@@ -1,0 +1,63 @@
+# NVIDIA Kubernetes device plugin.
+#
+# Advertises nvidia.com/gpu on nodes that have a GPU, so the scheduler can place
+# pods that request one. Without it, `resources.limits: nvidia.com/gpu: 1` makes
+# a pod permanently Pending with "Insufficient nvidia.com/gpu" — verified.
+#
+# Pinned to v0.19.3 (released 2026-06-22, latest at time of writing).
+#
+# PREREQUISITES on each GPU node, all of which must already be true:
+#   1. NVIDIA driver installed          — nvidia-smi works
+#   2. nvidia-container-toolkit installed — nvidia-container-cli info works
+#   3. containerd knows the nvidia runtime — see containerd-nvidia.toml
+#
+# Step 3 is the one that is missing on a stock k0s worker.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+    spec:
+      # The plugin itself needs the nvidia runtime to see the devices, because
+      # nvidia is registered as an additional runtime rather than the default.
+      runtimeClassName: nvidia
+      # Tolerate the standard GPU taint so this still works if you later taint
+      # GPU nodes to keep general workloads off them.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      # Only schedule where a GPU actually exists. Without a node label to key
+      # on, this DaemonSet would also land on the CPU-only nodes and crash-loop.
+      # Label your GPU nodes:
+      #   kubectl label node <node> nvidia.com/gpu.present=true
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.19.3
+          env:
+            # Report the plugin's own view of failures rather than silently
+            # advertising zero devices.
+            - name: FAIL_ON_INIT_ERROR
+              value: "true"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins

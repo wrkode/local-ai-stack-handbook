@@ -708,6 +708,134 @@ probe credentials, node resource ceilings.
 | Backup and restore procedure | documented, never executed |
 | ROCm, Intel SYCL, Vulkan, Metal | still only CUDA 12 available |
 
+## Pass 5: GPU in Kubernetes
+
+The operator installed the NVIDIA device plugin path with us. This closed the last major gap and
+produced **three more prerequisite failures**, each with a distinct and initially misleading error.
+
+Node: `grogu`, bare metal amd64, Quadro RTX 6000 24 GB, driver 590.44.01, k0s v1.34.3.
+
+### Four prerequisites, not two
+
+Driver and `nvidia-container-toolkit` were already present — Docker on that host ran `--gpus all`
+fine. That turned out to be irrelevant: **Docker's toolkit configuration does not touch k0s's own
+containerd.**
+
+```text
+Failed to create pod sandbox: failed to get sandbox runtime:
+no runtime for "nvidia" is configured
+```
+
+`/etc/k0s/containerd.d/` was **empty**. A stock k0s worker has no nvidia runtime.
+
+### Failure: the drop-in silently did nothing
+
+First attempt put the *RuntimeClass YAML* into `/etc/k0s/containerd.d/` — my fault for shipping two
+similarly named files (`00-runtimeclass.yaml` and `containerd-nvidia.toml`) without saying which
+goes where. k0s ignored it, and `k0sworker` had not been restarted either
+(`ActiveEnterTimestamp` was three months old).
+
+Two independent silent-failure modes, now documented together:
+
+- a drop-in **missing `version = 2`** is discarded with no error
+- containerd reads drop-ins **only at startup**
+
+The check that settles it: `grep -c nvidia /run/k0s/containerd-cri.toml` must be non-zero.
+
+### Failure: cgroup driver mismatch
+
+With the correct TOML in place, the runtime resolved and the failure moved one layer deeper:
+
+```text
+OCI runtime create failed: runc create failed: expected cgroupsPath to be of format
+"slice:prefix:name" for systemd cgroups, got "/kubepods/besteffort/pod<uid>/<id>" instead
+```
+
+I had written `SystemdCgroup = true`, carrying over the kubeadm-typical default. **k0s uses
+cgroupfs.** The error itself contains the proof: the path it *received* is cgroupfs format.
+
+Set `false`, restart, and the plugin came up:
+
+```text
+Detected platform: nvml
+Registered device plugin for 'nvidia.com/gpu' with Kubelet
+```
+
+`nvidia.com/gpu` capacity=1, allocatable=1.
+
+### Failure: liveness probe kills the 1.8 GiB backend download
+
+The most valuable of the three, because it is latent on CPU and only bites on first GPU deployment.
+
+After switching to the CUDA image and discarding the backends PVC, the pod ran but never became
+Ready — and restarted repeatedly:
+
+```text
+Downloading … quay.io/go-skynet/local-ai-backends:latest-gpu-nvidia-cuda-12-llama-cpp
+  current="1.5 GiB" total="1.8 GiB" percentage=85.25
+…
+Liveness probe failed: Get "http://10.244.172.235:8080/readyz": connect: connection refused
+```
+
+**5 restarts**, each discarding an 85%-complete 1.8 GiB download.
+
+The mechanism: model and backend installation happens **before** the HTTP listener starts, so
+`/readyz` refuses connections for the duration. My liveness probe (30 s delay, 6 × 15 s) killed the
+container at ~120 s. The CPU backend is small enough to finish inside that window — which is
+exactly why this never appeared in passes 1–4.
+
+Fix is the textbook one: a **`startupProbe`**, which suspends liveness and readiness until the app
+starts once.
+
+```yaml
+startupProbe:
+  httpGet: { path: /readyz, port: 8080 }
+  periodSeconds: 15
+  failureThreshold: 120      # 30 minutes
+```
+
+Result: Ready in ~3 minutes, **zero restarts**.
+
+### The GPU was then genuinely in use
+
+Three independent confirmations, because the image tag alone proves nothing:
+
+```text
+/backends            →  cuda12-llama-cpp
+log                  →  capability="nvidia-cuda-12"
+nvidia-smi           →  1223419, /backends/cuda12-llama-cpp/lib/ld.so, 2194 MiB
+```
+
+Note VRAM read **0 MiB** until the first inference request — LocalAI starts the backend process
+lazily, so an idle GPU is not evidence of a broken setup. That briefly looked like a failure.
+
+### Measured, and one claim corrected
+
+Same node, same model, same prompt, same 200-token cap, warm:
+
+| Workload | CPU | GPU | Speed-up |
+|---|---|---|---|
+| 200-token completion | 6.67 / 6.78 s | **1.41 / 1.50 s** | ~4.5x |
+| Throughput | ~30 tok/s | ~142 tok/s | ~4.7x |
+| Agent: knowledge + tool | 23.7 s | **2.12 s** | **~11x** |
+
+Both GPU pages previously said a GPU helps agent wall-clock **"only partly"**, reasoning that it
+cannot reduce the number of model calls. That reasoning is sound and the conclusion was wrong: 11x
+is not "partly". Corrected in `docs/01-localai/gpu.md` and `docs/06-deployment/gpu.md`.
+
+The advice to *count model calls* before buying hardware still stands — six calls where two would
+do is a prompt problem no device fixes — but it should not have been used to downplay the device.
+
+### Still not validated after pass 5
+
+| Configuration | Status |
+|---|---|
+| ROCm, Intel SYCL, Vulkan, Metal | only CUDA 12 hardware available |
+| Multi-GPU, or more than one GPU pod | one device in the cluster |
+| GPU under memory pressure / eviction | not attempted |
+| Ingress actually exercised | port-forward used throughout |
+| Backup and restore | documented, never executed |
+
 ## Open questions
 
 1. What populates `/api/traces/summary`? It stayed at zero throughout.

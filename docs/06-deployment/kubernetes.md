@@ -27,13 +27,14 @@ versions:
 results:
   all_four_workloads_ready: pass
   verify_stack_all_7_layers: pass
-  agent_with_knowledge_and_tool: pass — 23.7 s
+  agent_with_knowledge_and_tool: pass — 23.7 s CPU, 2.12 s GPU
   retrieval_across_pods: pass — 55.7 ms
-  defects_found_and_fixed: 3
+  gpu: pass — device plugin v0.19.3, cuda12-llama-cpp, 2194 MiB VRAM
+  defects_found_and_fixed: 4
 ```
 
-**Three real defects surfaced on first deployment**, none of which the Compose environment
-could have revealed. They are called out in place below and summarised in
+**Four real defects surfaced on deployment**, none of which the Compose environment could have
+revealed. They are called out in place below and summarised in
 [what Compose cannot teach you](#what-compose-cannot-teach-you).
 
 ## The shape, and why
@@ -458,7 +459,44 @@ An OOMKill during model load looks like a crash loop. Check `lastState.terminate
 kubectl get pod -l app=localai -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}'
 ```
 
+## Defect 4: the CUDA backend download outlives the liveness probe
+
+Only visible on a **first GPU deployment**, which makes it the nastiest of the four.
+
+Symptom: pod Running, never Ready, restarting every ~2 minutes.
+
+```text
+Downloading … latest-gpu-nvidia-cuda-12-llama-cpp current="1.5 GiB" total="1.8 GiB" percentage=85.25
+Liveness probe failed: Get "http://10.244.172.235:8080/readyz": connect: connection refused
+```
+
+**5 restarts**, each discarding an 85%-complete 1.8 GiB download.
+
+Model and backend installation happens **before** the HTTP listener starts, so `/readyz` refuses
+connections throughout. A liveness probe with a 30 s delay and 6 × 15 s threshold kills the
+container at ~120 s. The CPU backend is small enough to finish inside that window — which is why
+passes on CPU never revealed this.
+
+The fix is a **`startupProbe`**, which suspends liveness *and* readiness until the app has started
+once:
+
+```yaml
+          startupProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            periodSeconds: 15
+            failureThreshold: 120      # 30 minutes
+```
+
+Ready in ~3 minutes afterwards, zero restarts. `04-localai.yaml` now ships this.
+
+The general rule: **any container that does slow work before opening its port needs a
+`startupProbe`, not a generous `initialDelaySeconds`.**
+
 ## GPU
+
+Validated end to end on k0s v1.34.3 with an NVIDIA Quadro RTX 6000. The full procedure — containerd
+drop-in, RuntimeClass, device plugin, and the LocalAI patch — is in
+[`kubernetes/gpu/`](https://github.com/wrkode/local-ai-stack-handbook/tree/main/kubernetes/gpu).
 
 ```yaml
           image: localai/localai:v4.8.2-gpu-nvidia-cuda-12
@@ -466,6 +504,38 @@ kubectl get pod -l app=localai -o jsonpath='{.items[0].status.containerStatuses[
             limits:
               nvidia.com/gpu: 1
 ```
+
+Plus `runtimeClassName: nvidia`, because the nvidia runtime is registered as an *additional*
+runtime rather than the node default.
+
+**Four prerequisites, each failing differently:**
+
+| # | Requirement | Failure signature |
+|---|---|---|
+| 1 | NVIDIA driver | no devices at all |
+| 2 | `nvidia-container-toolkit` | runtime binary not found |
+| 3 | containerd knows the `nvidia` runtime | `no runtime for "nvidia" is configured` |
+| 4 | Device plugin advertising `nvidia.com/gpu` | pod `Pending`: `Insufficient nvidia.com/gpu` |
+
+1 and 2 are usually already satisfied if Docker on that host can run `--gpus all`. **3 and 4 are
+not** — Docker's toolkit configuration does not touch k0s's containerd, whose drop-in directory
+`/etc/k0s/containerd.d/` is **empty by default**.
+
+Two ways the containerd drop-in silently does nothing: **missing `version = 2`** (k0s discards it
+without error), and **not restarting** `k0sworker` (drop-ins are read only at startup). And
+`SystemdCgroup` must match the kubelet cgroup driver — **k0s uses cgroupfs, so `false`**; getting it
+wrong fails one layer deeper, in runc, with a message that names the cgroupfs path it received.
+
+**Measured**, same node, same model, same prompt, 200-token cap, warm:
+
+| Workload | CPU | GPU | Speed-up |
+|---|---|---|---|
+| 200-token completion | 6.67 s | **1.41 s** | ~4.5x |
+| Agent: knowledge + tool | 23.7 s | **2.12 s** | **~11x** |
+| VRAM attributed to the pod | — | **2194 MiB** | — |
+
+Note VRAM reads 0 MiB until the first inference request — the backend process starts lazily, so an
+idle GPU is not a sign of misconfiguration.
 
 ```yaml
       nodeSelector:
@@ -563,6 +633,7 @@ environment that had passed every check:
 | PostgreSQL `fsGroup` | Docker's entrypoint starts as root and chowns the volume itself |
 | Probes 401 under auth | Compose healthchecks run *inside* the container, where `curl` can read env vars; `httpGet` probes cannot read a Secret |
 | inotify exhaustion | a laptop running 4 containers never approaches 128 instances; a node running 45 pods does |
+| CUDA backend outliving the liveness probe | a Compose healthcheck has `start_period`; a Kubernetes liveness probe needs a separate `startupProbe`, and the 1.8 GiB backend only downloads on GPU |
 
 The general lesson: **Compose validates the application; Kubernetes validates the deployment.**
 Passing the former tells you the stack works. It tells you nothing about volume ownership, probe

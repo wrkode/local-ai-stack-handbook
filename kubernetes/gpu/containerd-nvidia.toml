@@ -1,0 +1,31 @@
+# k0s containerd drop-in registering the NVIDIA runtime.
+#
+# Install as root on every GPU node:
+#   sudo install -m 0644 containerd-nvidia.toml /etc/k0s/containerd.d/nvidia.toml
+#   sudo systemctl restart k0sworker
+#
+# `version = 2` is required: k0s merges drop-ins into a v2 containerd config,
+# and a drop-in without it is ignored silently. Verified against k0s v1.34.3
+# with containerd 1.7.30, whose drop-in directory /etc/k0s/containerd.d/ is
+# empty by default — so a stock k0s worker has NO nvidia runtime.
+#
+# This registers nvidia as an ADDITIONAL runtime rather than replacing the
+# default, so only pods that ask for it (runtimeClassName: nvidia) are affected.
+#
+# SystemdCgroup MUST match the node's kubelet cgroup driver. k0s uses **cgroupfs**,
+# so this is false. Setting it to true on k0s produces a sandbox that gets past
+# runtime lookup and then fails in runc:
+#
+#   expected cgroupsPath to be of format "slice:prefix:name" for systemd cgroups,
+#   got "/kubepods/besteffort/pod<uid>/<id>" instead
+#
+# That path shape IS the cgroupfs format, which is how you identify the mismatch.
+# On a kubeadm cluster, which defaults to the systemd driver, this must be true.
+# Verified on k0s v1.34.3.
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+  runtime_type = "io.containerd.runc.v2"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+    BinaryName = "/usr/bin/nvidia-container-runtime"
+    SystemdCgroup = false

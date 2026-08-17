@@ -285,18 +285,22 @@ LocalAI's Go source. Observed 2026-08-17.
 
 Worth stating, because it is a recurring disappointment:
 
-| Slow thing | Helped by a GPU? |
+| Slow thing | Helped? |
 |---|---|
-| Token generation | **yes** — this is the point |
-| Embedding a large ingestion | yes, per call, but you still make one call per chunk |
-| Model load time | marginally; it is largely I/O |
-| **Agent latency** | **only partly** |
+| Token generation | **yes** — measured **~4.5x** (30 -> 142 tok/s) |
+| Embedding a large ingestion | yes per call; the call count is unchanged |
+| Model load | marginally; largely I/O |
+| Retrieval | **no** — already 30-56 ms |
+| **Agent wall-clock** | **yes, substantially — measured ~11x** |
 
-That last row matters. An agent request is a loop: [Recipe 5](../05-recipes/agent-with-tools.md)
-took 38.7 s for three model calls, and [Recipe 8](../05-recipes/complete-agent-stack.md)
-took 24 s for two. A GPU shortens each call; it does not reduce the *number* of calls, and
-it does nothing for tool execution or retrieval. Retrieval was **29–37 ms** — already
-negligible. If an agent is slow, count the model calls before buying hardware.
+The agent row corrects an earlier, more pessimistic reading in this handbook. A GPU does not
+reduce the *number* of model calls an agent makes, so we expected only a partial gain. Measured on
+the same node, same model, same request, the agent went from **23.7 s to 2.12 s** — a larger
+speed-up than the raw token-rate improvement.
+
+Counting model calls is still the right first move when an agent is slow: a request making six
+calls where it should make two is a prompt or model-capability problem, and no device fixes that.
+But "a GPU barely helps agents" is not supported by measurement.
 
 ## Upstream references
 

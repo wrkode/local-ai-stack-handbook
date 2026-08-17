@@ -234,6 +234,22 @@ tested:
     result: >-
       All four workloads Ready and all 7 verify-stack layers pass, after fixing
       three defects the Compose environment could not have revealed.
+
+  - pass: 5
+    date: 2026-08-17
+    versions:
+      localai: "v4.8.2-gpu-nvidia-cuda-12"
+      device_plugin: "nvcr.io/nvidia/k8s-device-plugin:v0.19.3"
+    environment:
+      platform: kubernetes
+      distribution: k0s v1.34.3
+      node: grogu — bare metal amd64, NVIDIA Quadro RTX 6000 24 GB, driver 590.44.01
+      container_runtime: containerd + nvidia-container-toolkit 1.18.1, RuntimeClass nvidia
+      backend: cuda12-llama-cpp (1.8 GiB, installed on first run)
+    result: >-
+      GPU inference in Kubernetes. 200-token completion 6.7 s CPU -> 1.4 s GPU
+      (~4.5x); agent with knowledge and a tool 23.7 s -> 2.12 s (~11x);
+      2194 MiB VRAM attributed to the pod.
 ```
 
 | # | Configuration | Deployment | Result | Notes |
@@ -294,6 +310,16 @@ tested:
 | 54 | Agent with knowledge **and** a tool | k0s, postgres | **pass** | **23.7 s**; retrieved 4200, computed 42, set the counter — matching the 24.1 s Compose result |
 | 55 | Pod requesting `nvidia.com/gpu: 1` with no device plugin | k0s | **pass (as documented)** | stays **`Pending`**: `0/4 nodes are available: 4 Insufficient nvidia.com/gpu` — never `CrashLoopBackOff` |
 | 56 | nginx ingress annotations on Traefik | k0s, Traefik | **silently ignored** | Traefik has **no per-Ingress read-timeout annotation**; needs static config or a `ServersTransport` CRD |
+| 57 | Device plugin on a stock k0s worker | k0s v1.34.3 | **fail** | `no runtime for "nvidia" is configured`. `/etc/k0s/containerd.d/` is **empty by default**; Docker's toolkit config does not touch k0s's containerd. |
+| 58 | containerd drop-in with `SystemdCgroup = true` | k0s | **fail** | runtime lookup succeeded, then runc: `expected cgroupsPath to be of format "slice:prefix:name" … got "/kubepods/besteffort/…"`. **k0s uses cgroupfs** — must be `false`. |
+| 59 | Device plugin v0.19.3 after both fixes | k0s, grogu | **pass** | `1/1 Running`; `nvidia.com/gpu` capacity=1 allocatable=1; logs `Registered device plugin for 'nvidia.com/gpu' with Kubelet` |
+| 60 | First GPU deployment with liveness probe only | k0s | **fail** | CUDA backend is **1.8 GiB** and downloads **before** the HTTP listener starts, so `/readyz` refuses connections and liveness killed it at ~120 s — **5 restarts**, download restarting from zero each time. |
+| 61 | Same, with a `startupProbe` added | k0s | **pass** | Ready in ~3 min, **zero restarts**. The CPU backend fits inside the liveness window, so this defect appears **only** on first GPU deployment. |
+| 62 | CUDA backend auto-selected in Kubernetes | k0s, grogu | **pass** | `/backends` → `cuda12-llama-cpp`; log `capability="nvidia-cuda-12"` |
+| 63 | VRAM attributed to the pod's backend process | k0s, grogu | **pass** | **2194 MiB** against `/backends/cuda12-llama-cpp/lib/ld.so`; reads 0 MiB until the first request (lazy backend start) |
+| 64 | GPU vs CPU, 200-token completion, same node/model/prompt | k0s, grogu | **pass** | CPU **6.67 / 6.78 s** (~30 tok/s) → GPU **1.41 / 1.50 s** (~142 tok/s) = **~4.5x** |
+| 65 | GPU vs CPU, agent with knowledge and a tool | k0s, grogu | **pass** | **23.7 s → 2.12 s ≈ 11x.** Corrected an earlier claim that a GPU helps agent latency "only partly". |
+| 66 | All 7 verify-stack layers on GPU | k0s, grogu | **pass** | agent request 4 s |
 
 ### A reproduced failure worth knowing
 
@@ -341,7 +367,6 @@ Recorded honestly, because the gaps matter:
 | Long-term memory write-back | **not executed** — observed disabled in the log |
 | ROCm, Intel SYCL, Vulkan, Metal | **not executed** — only CUDA 12 was available |
 | GPU for LocalAGI or LocalRecall | **n/a** — neither ever uses a device |
-| GPU **in Kubernetes** | **not executed** — no device plugin on the cluster |
 | Distributed llama.cpp (`LLAMACPP_GRPC_SERVERS`) | **not executed** — the binary is present in the bundle |
 | `/v1/messages`, `/v1/rerank`, and the face/voice/vision endpoints | **not exercised** — routes confirmed present only |
 | Distributed mode (NATS + PostgreSQL) | **not executed** |

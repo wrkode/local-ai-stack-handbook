@@ -76,9 +76,25 @@ spec:
           # gallery rate-limited, both installs failed and /readyz still returned
           # 200 with ZERO models. So: /readyz for liveness, /v1/models for
           # readiness.
+          # startupProbe is REQUIRED, not optional tuning. Model and backend
+          # downloads happen BEFORE the HTTP listener starts, so /readyz refuses
+          # connections during them — and a liveness probe then kills the
+          # container mid-download, restarting the download from zero, forever.
+          #
+          # Verified: with liveness alone (30 s delay, 6 x 15 s), a first-run
+          # install of the 1.8 GiB cuda12-llama-cpp backend was killed at ~120 s
+          # and looped 5 times before we caught it. The CPU backend is small
+          # enough to finish inside that window, so this defect appears ONLY on
+          # first GPU deployment — the worst kind of latent bug.
+          #
+          # While a startupProbe is running, liveness and readiness are both
+          # suspended. 120 x 15 s = 30 minutes for the initial download.
+          startupProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            periodSeconds: 15
+            failureThreshold: 120
           livenessProbe:
             httpGet: { path: /readyz, port: 8080 }
-            initialDelaySeconds: 30
             periodSeconds: 15
             failureThreshold: 6
           readinessProbe:

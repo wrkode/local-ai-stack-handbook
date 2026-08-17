@@ -214,16 +214,20 @@ arrangement.
 
 | Slow thing | Helped? |
 |---|---|
-| Token generation | **yes** — the point |
-| Embedding a large ingestion | yes per call, but the call count is unchanged |
+| Token generation | **yes** — measured **~4.5x** (30 -> 142 tok/s) |
+| Embedding a large ingestion | yes per call; the call count is unchanged |
 | Model load | marginally; largely I/O |
-| Retrieval | **no** — already 29–37 ms |
-| **Agent wall-clock** | **only partly** |
+| Retrieval | **no** — already 30-56 ms |
+| **Agent wall-clock** | **yes, substantially — measured ~11x** |
 
-Agent latency is `iterations × model latency`. Measured on CPU:
-[Recipe 5](../05-recipes/agent-with-tools.md) took 38.7 s across three model calls;
-[Recipe 8](../05-recipes/complete-agent-stack.md) took 24.1 s across two. A GPU shortens each
-call and changes neither the iteration count nor tool execution time.
+The agent row corrects an earlier, more pessimistic reading in this handbook. A GPU does not
+reduce the *number* of model calls an agent makes, so we expected only a partial gain. Measured on
+the same node, same model, same request, the agent went from **23.7 s to 2.12 s** — a larger
+speed-up than the raw token-rate improvement.
+
+Counting model calls is still the right first move when an agent is slow: a request making six
+calls where it should make two is a prompt or model-capability problem, and no device fixes that.
+But "a GPU barely helps agents" is not supported by measurement.
 
 **Count the model calls before buying hardware:**
 
@@ -244,4 +248,5 @@ and no device fixes it.
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) — Docker device passthrough.
 - [Kubernetes device plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/) — how `nvidia.com/gpu` is advertised.
 - Tag inventory, CPU-only latency, retrieval timings and agent model-call counts: observed 2026-08-17 on darwin/arm64.
-- `cuda12-llama-cpp` in use, VRAM attribution, the `cpu-all` binary naming, auto-tuning setting all layers, CUDA OOM at 17,524 and 46,297 MiB, and MoE expert offload: observed 2026-08-17 on Ubuntu 24.04 amd64, NVIDIA Quadro RTX 6000. **ROCm, Intel and Vulkan untested.** See [version matrix](../00-overview/version-matrix.md).
+- `cuda12-llama-cpp` in use, VRAM attribution, the `cpu-all` binary naming, auto-tuning setting all layers, CUDA OOM at 17,524 and 46,297 MiB, and MoE expert offload: observed 2026-08-17 on Ubuntu 24.04 amd64, NVIDIA Quadro RTX 6000, under Docker.
+- GPU **in Kubernetes** — device plugin v0.19.3, `RuntimeClass`, containerd drop-in, 2194 MiB VRAM attributed to the pod, and the 4.5x / 11x measurements: observed 2026-08-17 on k0s v1.34.3. Procedure in [`kubernetes/gpu/`](https://github.com/wrkode/local-ai-stack-handbook/tree/main/kubernetes/gpu). **ROCm, Intel and Vulkan untested.** See [version matrix](../00-overview/version-matrix.md).
