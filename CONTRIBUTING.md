@@ -130,5 +130,5 @@ or a question the handbook fails to answer.
 
 ## Licence
 
-Contributions are accepted under the Apache License 2.0, matching
+Contributions are accepted under the MIT License, matching
 [`LICENSE`](LICENSE).

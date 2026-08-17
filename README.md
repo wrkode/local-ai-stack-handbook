@@ -183,4 +183,4 @@ citation rules and the recipe template.
 
 ## Licence
 
-Apache 2.0. See [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).

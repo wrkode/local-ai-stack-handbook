@@ -55,7 +55,11 @@ request — 38.7 s was measured for one tool call on CPU. When it fires, the cli
 ## Before you apply
 
 ```bash
-# 1. Replace every value in the Secret. The five keys must agree:
+# 1. Generate the PostgreSQL password. The shipped placeholder cannot work by
+#    accident, because a password committed to git is not a secret. Either edit
+#    02-secrets.yaml, or create the Secret directly (recommended — see the
+#    kubectl create secret block in that file's comments).
+#    If you enable API keys, the five must agree:
 #    LOCALAI_API_KEY == LOCALAGI_LLM_API_KEY == LOCALRECALL_OPENAI_API_KEY
 $EDITOR 02-secrets.yaml
 

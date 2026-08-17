@@ -7,7 +7,7 @@ repo_url: https://github.com/wrkode/local-ai-stack-handbook
 repo_name: wrkode/local-ai-stack-handbook
 edit_uri: edit/main/docs/
 copyright: >-
-  Apache 2.0. Not affiliated with the LocalAI, LocalAGI or LocalRecall projects.
+  MIT. Not affiliated with the LocalAI, LocalAGI or LocalRecall projects.
 
 docs_dir: docs
 
