@@ -33,6 +33,21 @@ spec:
       labels:
         app: postgres
     spec:
+      # REQUIRED on Kubernetes, and NOT needed under Docker Compose.
+      #
+      # A dynamically provisioned volume arrives root-owned, and this image runs
+      # as uid 999 / gid 104 (postgres). Without fsGroup, initdb fails with:
+      #   initdb: error: could not create directory
+      #           "/var/lib/postgresql/data/pgdata": Permission denied
+      # and the pod CrashLoopBackOffs. fsGroup makes the kubelet chown the
+      # volume to that GID on mount.
+      #
+      # Note the GID is 104, not 999 — verified by exec'ing the image. Do not
+      # assume uid == gid here.
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 104
+        fsGroup: 104
       containers:
         - name: postgres
           image: quay.io/mudler/localrecall:v0.6.4-postgresql

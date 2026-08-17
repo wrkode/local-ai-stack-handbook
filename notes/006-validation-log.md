@@ -566,6 +566,148 @@ aliased; `/completions`, `/rerank` and `/tokenize` are not.
 | Distributed llama.cpp (`LLAMACPP_GRPC_SERVERS`) | binary present in the bundle, not exercised |
 | Kubernetes | still not executed |
 
+## Pass 4: Kubernetes
+
+A k0s v1.34.3 cluster became available: 4 nodes (one bare-metal amd64 with the GPU, three VMs),
+Ubuntu 24.04.3, **Longhorn** as the default StorageClass, **Traefik** as the ingress controller,
+and **no GPU device plugin installed**.
+
+This pass moved `kubernetes/` from "not yet validated" to tested — and found **three defects that
+the Compose environment could not have revealed**, which is the most useful thing this pass
+produced.
+
+### Defect 1: PostgreSQL cannot create its data directory
+
+First deployment, immediate `CrashLoopBackOff`:
+
+```text
+initdb: error: could not create directory "/var/lib/postgresql/data/pgdata": Permission denied
+```
+
+A dynamically provisioned Longhorn volume arrives root-owned; the image runs unprivileged. Probing
+the image with a `sleep` pod:
+
+```text
+uid=999(postgres) gid=104(postgres) groups=104(postgres),102(ssl-cert)
+```
+
+**gid 104, not 999.** Assuming uid == gid would have produced a wrong `fsGroup` and the same
+failure. Fixed with `runAsUser: 999`, `runAsGroup: 104`, `fsGroup: 104`.
+
+Compose never hits this because the entrypoint starts as root and chowns the volume itself.
+
+### Defect 2: our own documented trap, applied to only one of three services
+
+`security.md` already warned that enabling `LOCALAGI_API_KEYS` breaks LocalAGI's healthcheck. We
+applied that lesson to LocalAGI's probe and **not** to the other two. With placeholder keys set:
+
+| Service | Result |
+|---|---|
+| LocalAI | `0/1 Running` **forever** |
+| LocalRecall | **liveness-killed**, 5 restarts |
+| LocalAGI | fine — its probe carried a header |
+
+```json
+{"uri":"/api/collections","user_agent":"kube-probe/1.34","status":401}
+```
+
+The structural cause is worth stating: **a Kubernetes `httpGet` probe cannot read a Secret.** And
+for LocalRecall there is *no* solution — `FROM scratch` rules out `exec` probes, and `httpGet`
+cannot carry a secret token. Options are hardcode, drop the probes, or leave inbound auth off.
+
+Two changes followed: the shipped Secret now defaults to **empty keys** with the enabling
+procedure documented, and LocalRecall has **readiness only** — because a 401 liveness probe is a
+permanent restart loop where a 401 readiness probe merely degrades.
+
+Writing a warning is not the same as applying it. This one cost two deployment cycles.
+
+### Defect 3: node inotify exhaustion kills LocalAI mid-request
+
+The subtlest, and the one with the least helpful error message. Every workload Ready,
+`/v1/models` correct, and then the **first inference request** returned an empty body while the
+pod exited 1:
+
+```text
+2026/08/17 18:15:32 FATAL -- failed to create Watcher
+github.com/hpcloud/tail/util.Fatal(…)
+github.com/hpcloud/tail/watch.(*InotifyTracker).run(…)
+```
+
+LocalAI tails its backend's log via `hpcloud/tail`, which needs an inotify **instance**; when the
+node has none, `util.Fatal` kills the process. The startup log had already hinted at it:
+
+```text
+ERROR failed creating watcher error=couldn't initialize inotify: too many open files
+```
+
+"too many open files" is a red herring — file descriptors were fine. The exhausted resource is
+`fs.inotify.max_user_instances`, counted **per UID**, and it was at the Linux default of **128**
+on a node running **50 pods**.
+
+Diagnosis method that isolated it: pin LocalAI to a less loaded node (14 pods) with a
+`nodeSelector`. Inference worked immediately there. Moving it back to the 50-pod node after an
+unrelated workload was removed (50 → 45 pods) also worked, with zero restarts.
+
+So the finding is real but marginal — the deployment sat a few pods away from failure. The durable
+fix is `sysctl fs.inotify.max_user_instances=8192`, which needs root on the node and was therefore
+left to the operator.
+
+### What then worked
+
+After the three fixes, all four workloads Ready and `verify-stack.sh --agent` passed all seven
+layers.
+
+| Operation | Compose (arm64) | Kubernetes (amd64) |
+|---|---|---|
+| Chat completion, warm | ~1 s | 1 s |
+| Retrieval hop | 29–37 ms | **55.7 ms**, cross-pod |
+| Agent + knowledge + tool | 24.1 s | **23.7 s** |
+| LocalAI restart, models in PVC | — | ~20 s to Ready |
+
+The cross-pod boundary was proven the same way as under Compose — by matching identities rather
+than assuming them. LocalRecall logged `remote_ip 10.244.172.216`; the LocalAGI pod's IP was
+`10.244.172.216`.
+
+### Two documented claims confirmed
+
+**GPU-requesting pods stay `Pending`.** With no device plugin installed:
+
+```text
+0/4 nodes are available: 4 Insufficient nvidia.com/gpu.
+preemption: 0/4 nodes are available: 4 Preemption is not helpful for scheduling.
+```
+
+`Pending`, never `CrashLoopBackOff` — exactly as `kubernetes.md` said.
+
+**Models persist in the PVC.** LocalAI went Ready in ~20 s after pod recreation, versus roughly 15
+minutes on first deployment while it downloaded.
+
+### One claim corrected
+
+`07-ingress.yaml` shipped `nginx.ingress.kubernetes.io/proxy-read-timeout`. The cluster runs
+**Traefik**, which ignores those annotations and has **no per-Ingress read-timeout equivalent** —
+its forwarding timeouts are static configuration or a `ServersTransport` CRD.
+
+Since that timeout is load-bearing for agent requests, an ignored annotation is worse than none:
+it looks correct until a request runs long. Now documented on the page.
+
+### The general lesson
+
+**Compose validates the application; Kubernetes validates the deployment.** Everything at the
+application layer transferred unchanged — service URLs, environment variables, retrieval
+behaviour, latencies. Every one of the three defects was at the platform layer: volume ownership,
+probe credentials, node resource ceilings.
+
+### Still not validated after pass 4
+
+| Configuration | Status |
+|---|---|
+| GPU **in Kubernetes** | no device plugin installed on the cluster |
+| Multiple replicas of anything | not attempted; LocalAGI is a singleton by design |
+| Ingress actually exercised | port-forward was used throughout; Traefik routing untested |
+| Backup and restore procedure | documented, never executed |
+| ROCm, Intel SYCL, Vulkan, Metal | still only CUDA 12 available |
+
 ## Open questions
 
 1. What populates `/api/traces/summary`? It stayed at zero throughout.

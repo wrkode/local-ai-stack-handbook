@@ -93,11 +93,13 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 10
-          livenessProbe:
-            httpGet: { path: /api/collections, port: 8080 }
-            initialDelaySeconds: 30
-            periodSeconds: 20
-            failureThreshold: 6
+          # NO liveness probe, deliberately. If API_KEYS is ever set this
+          # endpoint returns 401, and a liveness probe would then kill the
+          # container in a permanent restart loop — verified on a live cluster
+          # (5 restarts before we caught it). Readiness alone degrades safely.
+          #
+          # And remember this image is FROM scratch: no shell, no curl, so an
+          # exec probe that could carry a token is impossible here.
           resources:
             requests: { cpu: "250m", memory: "256Mi" }
             limits: { memory: "1Gi" }

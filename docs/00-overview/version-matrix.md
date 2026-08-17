@@ -216,6 +216,24 @@ tested:
         A third-party host running LocalAI for real work. Read-only inspection
         plus lightweight inference against an already-resident model; we did not
         install, remove or restart anything.
+
+  - pass: 4
+    date: 2026-08-17
+    versions:
+      localai: "v4.8.2"
+      localagi: "v2.8.1"
+      localrecall: "v0.6.4 + v0.6.4-postgresql"
+    environment:
+      platform: kubernetes
+      distribution: k0s v1.34.3
+      nodes: 4 — 1 bare-metal amd64 + 3 VMs, Ubuntu 24.04.3
+      storage: Longhorn (default StorageClass), ReadWriteOnce
+      ingress: Traefik
+      gpu_device_plugin: none installed
+      vector_engine: postgres
+    result: >-
+      All four workloads Ready and all 7 verify-stack layers pass, after fixing
+      three defects the Compose environment could not have revealed.
 ```
 
 | # | Configuration | Deployment | Result | Notes |
@@ -265,6 +283,17 @@ tested:
 | 43 | `GET /v1/models/capabilities` | Docker, amd64 | **pass** | per-model `capabilities` and `input_modalities`/`output_modalities` |
 | 44 | `GET /v1/responses/{id}` | Docker, amd64 | **pass** | OpenAI-shaped 404 with `param`/`type` — LocalAI stores responses; **standalone LocalAGI has no such route** |
 | 45 | `/v1/messages` (Anthropic shape) | Docker, amd64 | **route present** | responds 400 to an empty body; the shape itself was not exercised |
+| 46 | Full stack on **Kubernetes** | k0s v1.34.3, amd64, Longhorn, Traefik | **pass** | all four workloads Ready; `verify-stack.sh --agent` passes all 7 layers |
+| 47 | PostgreSQL StatefulSet, first attempt | k0s, Longhorn RWO | **fail** | `initdb: could not create directory … Permission denied`, CrashLoopBackOff. Longhorn volume is root-owned; image runs uid 999 / **gid 104**. Fixed with `fsGroup: 104`. |
+| 48 | Probes with authentication enabled | k0s | **fail** | LocalAI stuck `0/1` forever; LocalRecall **liveness-killed in a loop**. Both logged 401 from `kube-probe/1.34`. `httpGet` probes cannot read a Secret. |
+| 49 | LocalRecall probe with a token | k0s | **impossible** | `FROM scratch` → no `exec` probe; `httpGet` → cannot read a Secret. Must hardcode, drop probes, or leave `API_KEYS` empty. |
+| 50 | First inference request on a 50-pod node | k0s, amd64 | **fail** | `FATAL -- failed to create Watcher` (`hpcloud/tail`), pod exit 1 mid-request. Cause: `fs.inotify.max_user_instances = 128` exhausted. |
+| 51 | Same, after freeing 5 pods on the node | k0s, amd64 | **pass** | inference succeeded, zero restarts. Fragile — the durable fix is raising the sysctl. |
+| 52 | Model persistence across pod recreation | k0s, Longhorn | **pass** | LocalAI Ready in **~20 s**; models survived in the PVC |
+| 53 | Retrieval across a **pod** boundary | k0s | **pass** | **55.7 ms**; LocalRecall logged `remote_ip 10.244.172.216`, exactly the LocalAGI pod IP |
+| 54 | Agent with knowledge **and** a tool | k0s, postgres | **pass** | **23.7 s**; retrieved 4200, computed 42, set the counter — matching the 24.1 s Compose result |
+| 55 | Pod requesting `nvidia.com/gpu: 1` with no device plugin | k0s | **pass (as documented)** | stays **`Pending`**: `0/4 nodes are available: 4 Insufficient nvidia.com/gpu` — never `CrashLoopBackOff` |
+| 56 | nginx ingress annotations on Traefik | k0s, Traefik | **silently ignored** | Traefik has **no per-Ingress read-timeout annotation**; needs static config or a `ServersTransport` CRD |
 
 ### A reproduced failure worth knowing
 
@@ -312,7 +341,7 @@ Recorded honestly, because the gaps matter:
 | Long-term memory write-back | **not executed** — observed disabled in the log |
 | ROCm, Intel SYCL, Vulkan, Metal | **not executed** — only CUDA 12 was available |
 | GPU for LocalAGI or LocalRecall | **n/a** — neither ever uses a device |
-| Kubernetes deployment | **not executed** |
+| GPU **in Kubernetes** | **not executed** — no device plugin on the cluster |
 | Distributed llama.cpp (`LLAMACPP_GRPC_SERVERS`) | **not executed** — the binary is present in the bundle |
 | `/v1/messages`, `/v1/rerank`, and the face/voice/vision endpoints | **not exercised** — routes confirmed present only |
 | Distributed mode (NATS + PostgreSQL) | **not executed** |

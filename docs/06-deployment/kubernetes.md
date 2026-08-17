@@ -11,11 +11,30 @@ Manifests live in
 They are plain YAML, deliberately — Helm would hide exactly the details this page exists to
 show.
 
-> **Not yet validated.** No Kubernetes deployment was executed. The manifests are derived
-> from the validated Compose environment and from source; the workload requirements below
-> are source-verified. Treat this page as a well-founded starting point, not a tested
-> configuration. See the
-> [version matrix](../00-overview/version-matrix.md#not-yet-validated).
+```yaml
+tested:
+  date: 2026-08-17
+cluster:
+  distribution: k0s v1.34.3
+  nodes: 4 (1 bare-metal amd64 + 3 VMs), Ubuntu 24.04.3
+  storage: Longhorn (default), RWO
+  ingress: Traefik
+  gpu_device_plugin: none installed
+versions:
+  localai: "v4.8.2"
+  localagi: "v2.8.1"
+  localrecall: "v0.6.4 + v0.6.4-postgresql"
+results:
+  all_four_workloads_ready: pass
+  verify_stack_all_7_layers: pass
+  agent_with_knowledge_and_tool: pass — 23.7 s
+  retrieval_across_pods: pass — 55.7 ms
+  defects_found_and_fixed: 3
+```
+
+**Three real defects surfaced on first deployment**, none of which the Compose environment
+could have revealed. They are called out in place below and summarised in
+[what Compose cannot teach you](#what-compose-cannot-teach-you).
 
 ## The shape, and why
 
@@ -132,6 +151,133 @@ For LocalAGI, note that if `LOCALAGI_API_KEYS` is set the auth middleware is **g
                 - name: Authorization
                   value: Bearer $(LOCALAGI_API_KEY)
 ```
+
+## Defect 1: PostgreSQL will not start without `fsGroup`
+
+The first thing that broke, and a clean example of Compose hiding a problem.
+
+```text
+initdb: error: could not create directory "/var/lib/postgresql/data/pgdata": Permission denied
+```
+
+`CrashLoopBackOff`, three restarts in three minutes. A dynamically provisioned Longhorn volume
+arrives **root-owned**, and the image runs unprivileged.
+
+```bash
+kubectl -n localai-stack exec <pod> -- id
+```
+
+```text
+uid=999(postgres) gid=104(postgres) groups=104(postgres),102(ssl-cert)
+```
+
+**The GID is 104, not 999.** Do not assume uid == gid; verify it. The fix:
+
+```yaml
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 104
+        fsGroup: 104
+```
+
+`fsGroup` makes the kubelet chown the volume to that GID at mount time. Under Docker Compose
+this never arises, because the entrypoint starts as root and chowns the volume itself.
+
+## Defect 2: enabling authentication breaks every probe
+
+The second failure, and the more instructive one — because the handbook already warned about it
+for LocalAGI and we then made the same mistake for the other two services.
+
+With API keys set and probes unchanged, observed:
+
+| Service | Symptom |
+|---|---|
+| LocalAI | `0/1 Running` **forever** — readiness never passed |
+| LocalRecall | **killed by its liveness probe**, 5 restarts |
+| LocalAGI | fine — its probe already carried a header |
+
+Both logged the cause plainly:
+
+```json
+{"uri":"/api/collections","user_agent":"kube-probe/1.34","status":401}
+```
+
+The root problem is structural: **a Kubernetes `httpGet` probe cannot read a Secret.**
+`httpHeaders` values are static strings. So per service:
+
+| Service | Can a probe carry a token? |
+|---|---|
+| LocalAI | **yes** — `exec` probe with `curl -H "Authorization: Bearer $LOCALAI_API_KEY"`; the env var is already in the container |
+| LocalAGI | **yes**, but only as a **hardcoded literal** in `httpHeaders`, or via an `exec` probe (that image has `curl`) |
+| LocalRecall | **no.** `FROM scratch` means no shell for `exec`, and `httpGet` cannot read the Secret. Hardcode the token, drop the probes, or leave `API_KEYS` empty |
+
+Two rules follow:
+
+**Never put a liveness probe on an endpoint that can return 401.** A failing readiness probe
+degrades safely; a failing liveness probe is a permanent restart loop. The shipped
+`05-localrecall.yaml` therefore has **readiness only**.
+
+**Default to auth off, and turn it on deliberately.** The shipped `02-secrets.yaml` ships empty
+keys for exactly this reason, with the enabling procedure in its comments. A template whose
+placeholder values break every probe is worse than no template.
+
+## Defect 3: node inotify limits kill LocalAI mid-request
+
+The subtlest failure, and the one whose error message is least helpful.
+
+Symptom: every workload Ready, `/v1/models` correct, and then the **first inference request**
+returns an empty body while the pod restarts with exit code 1.
+
+```text
+INFO  BackendLoader starting modelID="qwen3-1.7b" backend="llama-cpp"
+INFO  effective runtime tuning … n_gpu_layers=99999999 parallel="8"
+2026/08/17 18:15:32 FATAL -- failed to create Watcher
+goroutine 5093 [running]:
+github.com/hpcloud/tail/util.Fatal(…)
+github.com/hpcloud/tail/watch.(*InotifyTracker).run(…)
+```
+
+LocalAI tails its backend's log via `hpcloud/tail`, which creates an **inotify instance**. When
+the node has none left, `util.Fatal` kills the whole process. A related non-fatal line appears
+at startup:
+
+```text
+ERROR failed creating watcher error=couldn't initialize inotify: too many open files
+```
+
+"too many open files" is misleading — the file-descriptor limit is fine. The exhausted resource
+is inotify **instances**, which are counted **per UID**, and most containers run as root:
+
+```bash
+ssh <node> sysctl fs.inotify.max_user_instances
+```
+
+```text
+fs.inotify.max_user_instances = 128
+```
+
+128 is the Linux default. The node in question was running **50 pods** — kubelet, containerd,
+CNI, monitoring, storage and KubeVirt agents all consume instances.
+
+Two fixes, verified in this order:
+
+**Reduce pod count on the node.** Removing an unrelated workload took the node from 50 to 45
+pods, and inference then worked with zero restarts. Effective, but fragile — it leaves you one
+pod away from the failure.
+
+**Raise the limit.** The durable fix, and it needs root on the node:
+
+```bash
+sudo sysctl -w fs.inotify.max_user_instances=8192
+```
+
+```bash
+echo 'fs.inotify.max_user_instances=8192' | sudo tee /etc/sysctl.d/99-inotify.conf
+```
+
+This is standard Kubernetes node tuning, not a LocalAI quirk — but LocalAI's reaction to
+exhaustion (`FATAL`, mid-request, with a `hpcloud/tail` stack trace) makes it look like an
+application bug. If you see `failed to create Watcher`, check the sysctl before anything else.
 
 ## Storage
 
@@ -266,6 +412,17 @@ spec:
                   number: 3000
 ```
 
+!!! warning "These annotations are ingress-nginx-specific"
+    Verified on a **Traefik** cluster: `nginx.ingress.kubernetes.io/*` annotations are simply
+    ignored, and Traefik has **no equivalent per-Ingress read-timeout annotation**. Its
+    forwarding timeouts are static configuration
+    (`--serversTransport.forwardingTimeouts.responseHeaderTimeout`) or a `ServersTransport`
+    CRD referenced by the Service — not something you set on the Ingress.
+
+    So on Traefik the timeout fix is **not in this file**. Check your controller before assuming
+    the annotation did anything; an ignored annotation looks exactly like a working one until an
+    agent request runs long.
+
 The default read timeout — 60 seconds on ingress-nginx — is **shorter than a real agent
 request**. Measured on CPU: 38.7 s for one tool call across three model calls, 24.1 s with
 knowledge and a tool. Under load, or with a larger model, both exceed 60 s comfortably.
@@ -395,6 +552,41 @@ Add `LOCALRECALL_URL` and drop the flag if you also forward LocalRecall.
 | 401 on internal hops, external surface fine | the five keys do not agree |
 | Retrieval silently stops working | LocalRecall unreachable — logs `Error finding similar strings inside KB` at INFO |
 | Collections empty after a restart | `COLLECTION_DB_PATH` defaulted into the container layer |
+
+## What Compose cannot teach you
+
+The point of this page, stated plainly. All three defects above were invisible in a Compose
+environment that had passed every check:
+
+| Defect | Why Compose hid it |
+|---|---|
+| PostgreSQL `fsGroup` | Docker's entrypoint starts as root and chowns the volume itself |
+| Probes 401 under auth | Compose healthchecks run *inside* the container, where `curl` can read env vars; `httpGet` probes cannot read a Secret |
+| inotify exhaustion | a laptop running 4 containers never approaches 128 instances; a node running 45 pods does |
+
+The general lesson: **Compose validates the application; Kubernetes validates the deployment.**
+Passing the former tells you the stack works. It tells you nothing about volume ownership, probe
+credentials, or node-level resource ceilings.
+
+What *did* transfer unchanged: every service URL, every environment variable, the port mappings,
+the retrieval behaviour, and the measured latencies. The application layer was portable; the
+platform layer was not.
+
+### Measured on Kubernetes
+
+| Operation | Compose (arm64, CPU) | Kubernetes (amd64, CPU) |
+|---|---|---|
+| Chat completion, warm | ~1 s | **1 s** |
+| Retrieval hop | 29–37 ms | **55.7 ms**, across pods |
+| Agent + knowledge + tool | 24.1 s | **23.7 s** |
+| LocalAI restart with models in the PVC | — | **~20 s to Ready** |
+
+The retrieval hop is slower — a real pod-to-pod network call rather than a container-to-container
+one on a single host — and still irrelevant next to a 23-second agent request.
+
+The cross-pod boundary was confirmed the same way as under Compose, by matching identities rather
+than assuming them: LocalRecall's access log recorded `remote_ip 10.244.172.216`, which is exactly
+the LocalAGI pod's IP.
 
 ## What this does not give you
 

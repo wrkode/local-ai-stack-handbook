@@ -86,13 +86,17 @@ spec:
           # proof. NOTE: with LOCALAGI_API_KEYS set, auth is GLOBAL and this
           # returns 401 — hence the header below. Remove it if you run without
           # authentication.
+          # No Authorization header, because LOCALAGI_API_KEYS is empty in
+          # 02-secrets.yaml. If you set it, LocalAGI's auth middleware is GLOBAL
+          # and this probe 401s. You would then have to add:
+          #   httpHeaders:
+          #     - name: Authorization
+          #       value: "Bearer <the same literal token>"
+          # It must be a literal: httpGet probes cannot read a Secret.
           readinessProbe:
             httpGet:
               path: /api/agents
               port: 3000
-              httpHeaders:
-                - name: Authorization
-                  value: "Bearer REPLACE-ME"
             initialDelaySeconds: 20
             periodSeconds: 15
             failureThreshold: 20
@@ -100,9 +104,6 @@ spec:
             httpGet:
               path: /api/agents
               port: 3000
-              httpHeaders:
-                - name: Authorization
-                  value: "Bearer REPLACE-ME"
             initialDelaySeconds: 60
             periodSeconds: 20
             failureThreshold: 6
