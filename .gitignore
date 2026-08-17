@@ -4,8 +4,13 @@
 # That tooling is a private authoring concern and is not part of the handbook.
 # ---------------------------------------------------------------------------
 .claude/
-CLAUDE.md
-AGENTS.md
+/CLAUDE.md
+# Anchored with a leading slash so it matches ONLY the root AI-assistant file.
+# Unanchored, this pattern matched docs/02-localagi/agents.md — git applies
+# ignore rules case-insensitively when core.ignoreCase is true, which it is on
+# macOS by default. The page was silently never committed, and only CI caught it,
+# because local link checks read the working tree rather than the index.
+/AGENTS.md
 .cursor/
 .cursorrules
 .aider*

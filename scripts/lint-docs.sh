@@ -161,6 +161,35 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+head_ "Content files are tracked by git"
+# ---------------------------------------------------------------------------
+# The link checker reads the WORKING TREE, so a file that exists locally but was
+# never committed passes locally and fails in CI. That happened: .gitignore
+# listed an unanchored "AGENTS.md", and because git matches ignore rules
+# case-insensitively when core.ignoreCase is true (the macOS default), it
+# silently swallowed docs/02-localagi/agents.md — a real page, in the nav, linked
+# from two others.
+if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+  untracked=''
+  for d in docs notes examples kubernetes compose scripts; do
+    [ -d "$d" ] || continue
+    while IFS= read -r f; do
+      case "$f" in */.env) continue ;; esac
+      git ls-files --error-unmatch "$f" >/dev/null 2>&1 || untracked="${untracked}${f}"$'\n'
+    done < <(find "$d" -type f)
+  done
+  if [ -n "$untracked" ]; then
+    fail_ "content files exist locally but are NOT tracked by git:"
+    printf '%s' "$untracked"
+    note_ "check: git check-ignore -v <path>"
+  else
+    pass_ "every content file is tracked"
+  fi
+else
+  note_ "not a git repository — skipped"
+fi
+
+# ---------------------------------------------------------------------------
 head_ "Internal links and anchors"
 # ---------------------------------------------------------------------------
 if python3 scripts/check-links.py > /tmp/lint-links.$$ 2>&1; then
