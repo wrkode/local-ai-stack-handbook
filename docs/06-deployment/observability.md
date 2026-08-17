@@ -26,7 +26,22 @@ because that is what exists.
 curl -s http://localhost:8080/metrics | grep -c '^# HELP'
 ```
 
-Observed: **44 metric families**. Then:
+Observed: **44 metric families**.
+
+Two non-metric endpoints fill real gaps and are worth wiring into a dashboard instead:
+
+```bash
+curl -s http://localhost:8080/system | jq
+```
+
+```json
+{"backends":["llama-cpp","cuda12-llama-cpp"],
+ "loaded_models":[{"id":"qwen3next-80b-moecpu","backend":"llama-cpp"}]}
+```
+
+**This is how you answer "which models are resident"** — admin-gated, and it shows the backend
+alias beside the resolved variant. `GET /v1/models/capabilities` similarly reports per-model
+capabilities and modalities. Neither is a Prometheus metric, so both need a scraper of their own. Then:
 
 ```bash
 curl -s http://localhost:8080/metrics | grep '^# HELP' | grep -v '^# HELP go_\|^# HELP process_'
@@ -57,8 +72,8 @@ What it does **not** give you:
 |---|---|
 | Request latency per endpoint | **yes**, via `api_call` |
 | Tokens generated or consumed | **no** |
-| Model load events and duration | **no** |
-| Which models are resident | **no** |
+| Model load events and duration | **no** — but the `effective runtime tuning` log line marks each load |
+| Which models are resident | **yes — `GET /system`**, not a metric |
 | Backend process health or count | **no** |
 | Queue depth or concurrency | **no** |
 | GPU utilisation | **no** |
@@ -333,7 +348,7 @@ It exits non-zero at the first failing layer and names it.
 | No request ID propagation | correlation is by timestamp and container IP |
 | `usage` hardcoded to zero | no token accounting or cost attribution at the agent layer |
 | `/api/traces/summary` empty for HTTP traffic | misleading if dashboarded |
-| No model-load metric | cold-start cost invisible except in the latency tail |
+| No model-load metric | cold-start cost invisible except in the latency tail and the `effective runtime tuning` log line |
 | Action history capped at 10, in memory | tool audit trail lost on restart |
 | API keys have no identity | actions cannot be attributed to a person |
 | Knowledge guards log at DEBUG | the most common misconfiguration is invisible |
@@ -352,4 +367,6 @@ discover it.
 - [LocalAGI `core/state/pool.go`](https://github.com/mudler/LocalAGI/blob/v2.9.0/core/state/pool.go) — `Status.addResult` trimming to ten at 83-90.
 - [LocalRecall `main.go`](https://github.com/mudler/LocalRecall/blob/v0.6.4/main.go) — Echo logger and recover middleware at 57-58. Validated against v0.6.4.
 - [LocalRecall `rag/persistency.go`](https://github.com/mudler/LocalRecall/blob/v0.6.4/rag/persistency.go) — the `Chunked file` and `Stored file` log lines.
-- Metric family counts, the 404s on LocalAGI and LocalRecall `/metrics`, the empty `api/traces/summary`, the empty access-log `id`, every latency figure, and the knowledge-down hallucination: observed 2026-08-17, see [version matrix](../00-overview/version-matrix.md).
+- [LocalAI `core/http/routes/localai.go`](https://github.com/mudler/LocalAI/blob/v4.8.2/core/http/routes/localai.go) — `GET /system` registered with `adminMiddleware` at 417.
+- Metric family counts, the 404s on LocalAGI and LocalRecall `/metrics`, the empty `api/traces/summary`, the empty access-log `id`, every latency figure, and the knowledge-down hallucination: observed 2026-08-17 on darwin/arm64.
+- `GET /system` and `/v1/models/capabilities` responses, and the `effective runtime tuning` load banner: observed 2026-08-17 on linux/amd64 with a CUDA GPU. See [version matrix](../00-overview/version-matrix.md).

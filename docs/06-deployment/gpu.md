@@ -144,8 +144,9 @@ services:
       - "host.docker.internal:host-gateway"
 ```
 
-Note that our own validation was CPU-only under Docker on Apple Silicon, which is why every
-GPU claim here is documented or source-verified rather than tested.
+The Apple Silicon validation was CPU-only for this reason. The **CUDA 12** path on this page was
+validated separately on Ubuntu 24.04 amd64 with an NVIDIA Quadro RTX 6000; **ROCm, Intel SYCL,
+Vulkan and Metal remain untested.**
 
 ## Proving the GPU is used
 
@@ -156,7 +157,12 @@ docker exec localai ls /backends
 ```
 
 **A `cpu-llama-cpp` directory on a GPU image means you are running on the CPU.** This is
-the single most useful check on this page.
+the single most useful check on this page. Verified on a working CUDA host, `/backends` held
+`cuda12-llama-cpp` and `llama-cpp`.
+
+Do **not** judge by the process name: the running binary there was `llama-cpp-cpu-all`, which means
+"all CPU microarchitecture variants in one binary", and `nvidia-smi` still attributed 3136 MiB of
+VRAM to it. The directory is the signal.
 
 Backends are downloaded as OCI artifacts at **model-install time**, and the variant is
 chosen by hardware detection *inside the container*. If the device was invisible then, the
@@ -237,4 +243,5 @@ and no device fixes it.
 - [LocalAI `gallery/qwen3.yaml`](https://github.com/mudler/LocalAI/blob/v4.8.2/gallery/qwen3.yaml) — the `context_size: 8192` the reference model actually uses.
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) — Docker device passthrough.
 - [Kubernetes device plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/) — how `nvidia.com/gpu` is advertised.
-- Tag inventory, CPU-only latency on Apple Silicon, retrieval timings and agent model-call counts: observed 2026-08-17. **No GPU configuration was tested** — see [version matrix](../00-overview/version-matrix.md).
+- Tag inventory, CPU-only latency, retrieval timings and agent model-call counts: observed 2026-08-17 on darwin/arm64.
+- `cuda12-llama-cpp` in use, VRAM attribution, the `cpu-all` binary naming, auto-tuning setting all layers, CUDA OOM at 17,524 and 46,297 MiB, and MoE expert offload: observed 2026-08-17 on Ubuntu 24.04 amd64, NVIDIA Quadro RTX 6000. **ROCm, Intel and Vulkan untested.** See [version matrix](../00-overview/version-matrix.md).

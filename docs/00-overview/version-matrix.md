@@ -45,9 +45,10 @@ And the cogito split, which is the one that changes behaviour:
 | Runs | cogito version | Date |
 |---|---|---|
 | LocalAI v4.8.2 | `v0.11.1-0.20260721…` | 2026-07-21 |
-| LocalAGI v2.9.0 | `v0.9.5-0.20260315…` | 2026-03-15 |
+| LocalAGI v2.9.0 (source) | `v0.9.5-0.20260315…` | 2026-03-15 |
+| LocalAGI v2.8.1 (**the only image**) | `v0.9.1-0.20260216…` | 2026-02-16 |
 
-Roughly four months apart. Capabilities present in the newer cogito — sub-agent
+Roughly five months between the extremes. Capabilities present in the newer cogito — sub-agent
 spawning, KV-cache prefill, self-editing system prompts, park/resume — are not
 reachable from standalone LocalAGI. "Agent behaviour" therefore differs between
 Pattern A and Pattern B deployments of nominally the same feature.
@@ -198,6 +199,23 @@ tested:
       deployment: compose/ reference environment, Pattern B
       vector_engine: postgres
       gpu: none
+
+  - pass: 3
+    date: 2026-08-17
+    versions:
+      localai: "v4.8.2 (5ff25d9d145e0a03a5b9a3559c620f1e1204ca6d), image tag v4.8.2-gpu-nvidia-cuda-12"
+      localagi: "not present"
+      localrecall: "not present"
+    environment:
+      architecture: amd64
+      host: Ubuntu 24.04.3 LTS, kernel 6.8.0-88-generic
+      runtime: Docker 29.7.2
+      gpu: NVIDIA Quadro RTX 6000, 24576 MiB, driver 590.44.01
+      backend: cuda12-llama-cpp
+      note: >-
+        A third-party host running LocalAI for real work. Read-only inspection
+        plus lightweight inference against an already-resident model; we did not
+        install, remove or restart anything.
 ```
 
 | # | Configuration | Deployment | Result | Notes |
@@ -232,6 +250,21 @@ tested:
 | 28 | `mkdocs build --strict` | local, Python 3.9 | **pass** | 2.22 s, no warnings — **after** correcting an impossible version pin |
 | 29 | `shellcheck -S warning`, all scripts | local | **pass** | |
 | 30 | `pymdown-extensions==11.0.1` from `requirements-docs.txt` | local | **fail — version does not exist** | Our own defect. Highest available is `10.21.3`. Corrected. |
+| 31 | LocalAI v4.8.2 on **linux/amd64** | Docker, Ubuntu 24.04, amd64 | **pass** | Same build commit as pass 1/2. First amd64 validation. |
+| 32 | **CUDA 12 backend installed and used** | Docker, amd64, Quadro RTX 6000 | **pass** | `/backends` holds `cuda12-llama-cpp`; `nvidia-smi` attributes **3136 MiB** to the backend PID |
+| 33 | Backend as an OCI artifact | Docker, amd64 | **pass** | `metadata.json` names `quay.io/go-skynet/local-ai-backends:latest-gpu-nvidia-cuda-12-llama-cpp` with a pinned digest, and `alias: llama-cpp` |
+| 34 | Backend process and ephemeral gRPC port | Docker, amd64 | **pass** | `lib/ld.so … llama-cpp-cpu-all --addr 127.0.0.1:45479` |
+| 35 | Hardware auto-tuning | Docker, amd64, GPU | **pass** | `effective runtime tuning … n_gpu_layers=99999999 n_batch=512 parallel=4 flash_attention=auto`; disabled by `LOCALAI_DISABLE_HARDWARE_DEFAULTS=true` |
+| 36 | Auto-tuned load of a 30B MoE on 24 GB | Docker, amd64, GPU | **fail — CUDA OOM** | `cudaMalloc failed` allocating **17,524 MiB**. An 80B model asked for **46,297 MiB**. Caused by `n_gpu_layers=all`. |
+| 37 | MoE expert offload via `tensor_buft_overrides` | Docker, amd64, GPU | **pass** | 80B MoE resident on a 24 GB card: **3136 MiB VRAM + ~46 GB RSS**. Opaque `options:` passthrough — the string appears nowhere in LocalAI's Go source. |
+| 38 | `/v1/chat/completions` streaming | Docker, amd64, GPU | **pass** | SSE, `object: chat.completion.chunk` |
+| 39 | Chat Completions `usage` | Docker, amd64, GPU | **pass** | **real** values — `{"prompt_tokens":11,"completion_tokens":1,"total_tokens":12}`, unlike the agent path |
+| 40 | Response `id` format | Docker, amd64, GPU | **pass, surprising** | a **bare UUID**, not `chatcmpl-…`. **Corrected an earlier claim** that this was LocalAGI-specific. |
+| 41 | Un-prefixed route aliases | Docker, amd64 | **pass, partial** | `/chat/completions`, `/embeddings`, `/images/generations`, `/audio/transcriptions`, `/responses`, `/messages` aliased; `/completions`, `/rerank`, `/tokenize` **not**. Aliasing is selective. |
+| 42 | `GET /system` | Docker, amd64 | **pass** | reports resident models and backend aliases — **corrected** an earlier claim that residency was unavailable |
+| 43 | `GET /v1/models/capabilities` | Docker, amd64 | **pass** | per-model `capabilities` and `input_modalities`/`output_modalities` |
+| 44 | `GET /v1/responses/{id}` | Docker, amd64 | **pass** | OpenAI-shaped 404 with `param`/`type` — LocalAI stores responses; **standalone LocalAGI has no such route** |
+| 45 | `/v1/messages` (Anthropic shape) | Docker, amd64 | **route present** | responds 400 to an empty body; the shape itself was not exercised |
 
 ### A reproduced failure worth knowing
 
@@ -277,9 +310,11 @@ Recorded honestly, because the gaps matter:
 | MCP servers, of any kind | **not executed** |
 | Multi-agent delegation (`call_agents`) | **not executed** |
 | Long-term memory write-back | **not executed** — observed disabled in the log |
-| Any GPU configuration (CUDA, ROCm, Intel, Metal) | **not executed** |
+| ROCm, Intel SYCL, Vulkan, Metal | **not executed** — only CUDA 12 was available |
+| GPU for LocalAGI or LocalRecall | **n/a** — neither ever uses a device |
 | Kubernetes deployment | **not executed** |
-| linux/amd64 anything | **not executed** |
+| Distributed llama.cpp (`LLAMACPP_GRPC_SERVERS`) | **not executed** — the binary is present in the bundle |
+| `/v1/messages`, `/v1/rerank`, and the face/voice/vision endpoints | **not exercised** — routes confirmed present only |
 | Distributed mode (NATS + PostgreSQL) | **not executed** |
 | Pattern A with agents enabled *and* knowledge | **not executed** |
 

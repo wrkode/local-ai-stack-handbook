@@ -167,7 +167,7 @@ CPU-only, `qwen3-1.7b`.
 
 | Request | Model calls | Wall clock |
 |---|---|---|
-| Chat completion, warm | 1 | proportional to tokens |
+| Chat completion, warm | 1 | proportional to tokens — **streaming verified**, SSE `chat.completion.chunk` |
 | Chat completion, incl. model load | 1 | 4 s |
 | Agent, no tools, no knowledge | 1 | 2–3 s |
 | Agent, knowledge only | 1 | **2.27 s** |
@@ -199,12 +199,21 @@ retrying a Chat Completion is free; retrying an agent request may send a second 
 | `tool_choice` | yes | yes, for `{"type":"function","name":…}` |
 | `previous_response_id` | — | **request side works**; echoed back as `null` |
 | `usage` | real | **zeros** |
-| Response `id` | `chatcmpl-…` | a **bare UUID**, not `resp_…` |
+| Response `id` | a **bare UUID**, not `chatcmpl-…` | a **bare UUID**, not `resp_…` |
 | `store` | — | reported `false`; accurate |
 
-Two client-breaking details there: the response `id` has no `resp_` prefix, and
-`previous_response_id` always comes back `null` even when you sent one — so do not use the echo
-to confirm continuation worked.
+Two client-breaking details there. **Neither endpoint prefixes its response `id`**: LocalAI's
+Chat Completions returns a bare UUID where OpenAI returns `chatcmpl-…`, and LocalAGI returns a
+bare UUID where OpenAI returns `resp_…`. Both verified:
+
+```text
+POST /v1/chat/completions  ->  id: 20f92f49-a575-4220-81e8-d1b7a8769c76, object: chat.completion
+POST /v1/responses         ->  id: b9ec1e4d-41c5-42b7-a18a-d12d21040be4, object: response
+```
+
+So client code that pattern-matches on the prefix fails against both. And
+`previous_response_id` always comes back `null` even when you sent one — do not use the echo to
+confirm continuation worked.
 
 ### Three kinds of tool, which is easy to miss
 

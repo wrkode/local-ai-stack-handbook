@@ -416,6 +416,156 @@ Recorded so the gaps are explicit. Every page describing these is source-verifie
 | Distributed mode (NATS) | not executed |
 | Multiple replicas of anything | not executed |
 
+## Pass 3: linux/amd64 with a CUDA GPU
+
+A second host became available: **Ubuntu 24.04.3 amd64, NVIDIA Quadro RTX 6000 (24 GB, driver
+590.44.01), Docker 29.7.2**, running `localai/localai:v4.8.2-gpu-nvidia-cuda-12` — the same build
+commit as passes 1 and 2.
+
+It was **someone's working host**, with their own large MoE models resident. Scope was therefore
+deliberately limited: read-only inspection, plus lightweight inference against an
+**already-resident** model. Nothing was installed, removed or restarted. That constraint is worth
+recording because it shaped what could be learned — no cold-start or eviction measurements.
+
+This pass closed two of the biggest gaps in the matrix (`linux/amd64 anything` and
+`any GPU configuration`) and produced most of the material for
+[the model runtime abstraction](../docs/07-deep-dives/model-runtime-abstraction.md).
+
+### Backends really are OCI artifacts
+
+`/backends/cuda12-llama-cpp/metadata.json`:
+
+```json
+{"alias":"llama-cpp","name":"cuda12-llama-cpp",
+ "uri":"quay.io/go-skynet/local-ai-backends:latest-gpu-nvidia-cuda-12-llama-cpp",
+ "digest":"sha256:a7524ea57df8d085b603db428c5f5cc62d0c5dfceff38a4195de0fa18ffcbe50",
+ "installed_at":"2026-08-15T18:32:35Z"}
+```
+
+`alias: llama-cpp` is the mechanism that makes `backend: llama-cpp` in a model YAML portable across
+hardware. The `uri` is a container image, pinned by digest.
+
+### The naming trap: `llama-cpp-cpu-all` on a GPU
+
+The resident process was:
+
+```text
+/backends/cuda12-llama-cpp/lib/ld.so \
+  /backends/cuda12-llama-cpp/llama-cpp-cpu-all --addr 127.0.0.1:45479
+```
+
+…and `nvidia-smi` attributed **3136 MiB of VRAM to that PID**.
+
+`run.sh` explains it: `cpu-all` means "**all CPU microarchitecture variants in one binary**" —
+ggml's registry `dlopen`s the best `libggml-cpu-*.so` — not "CPU-only". The bundle's `lib/` holds 67
+libraries: 13 `libggml-cpu-*.so` variants *and* `libcublas`/`libcudart` 12.8.
+
+This refined a claim in both GPU pages. "A `cpu-llama-cpp` directory means CPU" is still right; "a
+`cpu-all` **binary** means CPU" would have been wrong, and is exactly the mistake a reader doing
+`ps aux` would make. Both pages now say to judge by the directory.
+
+### Hardware auto-tuning, and the OOM it causes
+
+An undocumented-by-us variable surfaced in the log:
+
+```text
+INFO effective runtime tuning (override in the model YAML;
+     LOCALAI_DISABLE_HARDWARE_DEFAULTS=true disables hardware auto-tuning)
+     modelID="qwen3-coder-30b-a3b-instruct" context=8192 n_batch=512
+     n_gpu_layers=99999999 parallel="4" flash_attention="auto" f16=false
+```
+
+`n_gpu_layers=99999999` means "offload everything", and on a 24 GB card that fails loudly:
+
+```text
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 17524.43 MiB on device 0:
+cudaMalloc failed: out of memory
+```
+
+An 80B model asked for **46,297 MiB**. Both failures were recurring in this host's log — a real
+operator hitting a real limit, not a contrived test.
+
+`core/config/hardware_defaults.go` documents the mechanism, including a specific heuristic
+(`BlackwellPhysicalBatch = 2048` for sm_12x, measured upstream on a GB10) and the fact that the
+tuner is parameterised on a GPU *descriptor* so the distributed router can pass a remote node's GPU.
+
+### The operator's own workaround: MoE expert offload
+
+The host's working configurations solve the OOM by placing expert tensors in system RAM:
+
+```yaml
+# 80B MoE: all experts on CPU
+gpu_layers: 999
+options: [use_jinja:true, "tensor_buft_overrides:exps=CPU"]
+```
+
+```yaml
+# 30B MoE: experts from block 16 up on CPU, plus a quantised KV cache
+gpu_layers: 999
+flash_attention: true
+cache_type_k: q8_0
+cache_type_v: q8_0
+options: [use_jinja:true, "tensor_buft_overrides:blk\\.(1[6-9]|[2-9][0-9])\\.ffn_.*_exps\\.=CPU"]
+```
+
+Result: an 80B MoE model **resident on a 24 GB card** — 3136 MiB VRAM, ~46 GB RSS.
+
+`tensor_buft_overrides` has **zero matches in LocalAI's Go tree**, yet it works. So `options:` is
+opaque passthrough to the backend — the abstraction's escape hatch, and also unvalidated: a typo is
+silently ineffective.
+
+### Two corrections to earlier claims
+
+**Response IDs.** LocalAI's Chat Completions returns a **bare UUID**
+(`20f92f49-a575-4220-81e8-d1b7a8769c76`, `object: chat.completion`), not `chatcmpl-…`. An earlier
+draft presented the bare-UUID divergence as LocalAGI-specific; it is ecosystem-wide. Corrected in
+[Responses vs Chat Completions](../docs/07-deep-dives/responses-vs-chat-completions.md).
+
+**Resident models are observable.** `observability.md` listed "which models are resident" as
+unavailable. `GET /system` provides exactly that:
+
+```json
+{"backends":["llama-cpp","cuda12-llama-cpp"],
+ "loaded_models":[{"id":"qwen3next-80b-moecpu","backend":"llama-cpp"}]}
+```
+
+It is admin-gated, and it also shows the alias beside the resolved variant.
+
+### A near-miss worth recording
+
+Probing un-prefixed aliases with `-d '{}'`, `/embeddings` returned 404 and was briefly recorded as
+"not aliased". It **is** aliased: the 404 was `model "" not found` — the same error `/v1/embeddings`
+gives. Only re-probing with a named model showed both forms returning identical bodies.
+
+**A 404 from a JSON API can mean "no such route" or "no such object".** Read the body before
+concluding. The corrected finding is that aliasing is *selective*: `/chat/completions`,
+`/embeddings`, `/images/generations`, `/audio/transcriptions`, `/responses` and `/messages` are
+aliased; `/completions`, `/rerank` and `/tokenize` are not.
+
+### Also confirmed
+
+| Claim | Result |
+|---|---|
+| `/v1/chat/completions` streaming | **works** — SSE, `object: chat.completion.chunk` |
+| Chat Completions `usage` | **real** — `{"prompt_tokens":11,"completion_tokens":1,"total_tokens":12}` |
+| `GET /v1/models/capabilities` | per-model capabilities and modalities |
+| `GET /v1/responses/{id}` | exists on LocalAI, OpenAI-shaped 404; **absent** on standalone LocalAGI |
+| `/v1/messages` | route present (Anthropic shape); not exercised |
+| Ephemeral loopback gRPC port | `--addr 127.0.0.1:45479` |
+| cogito runs inside LocalAI | `ERROR Error executing cogito error=failed to get relevant guidelines` |
+| Swagger path count on amd64 | 111, matching arm64 |
+
+### Still not validated after pass 3
+
+| Configuration | Status |
+|---|---|
+| ROCm, Intel SYCL, Vulkan, Metal | only CUDA 12 was available |
+| Cold start / model install on GPU | deliberately not attempted on someone's working host |
+| Eviction under GPU memory pressure | same |
+| LocalAGI or LocalRecall on amd64 | neither is deployed there |
+| Distributed llama.cpp (`LLAMACPP_GRPC_SERVERS`) | binary present in the bundle, not exercised |
+| Kubernetes | still not executed |
+
 ## Open questions
 
 1. What populates `/api/traces/summary`? It stayed at zero throughout.

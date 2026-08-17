@@ -77,8 +77,10 @@ Everything else in this handbook works unchanged; only LocalAI moves out of Dock
 also that **no Intel-Mac binary is published**: release assets cover `linux-amd64`,
 `linux-arm64`, `darwin-arm64` and a DMG.
 
-Our own validation was run CPU-only under Docker on Apple Silicon, which is why every
-GPU claim on this page is marked source-verified or documented rather than tested.
+Our Apple Silicon validation was CPU-only for exactly this reason. GPU claims on this page were
+subsequently validated on a **separate linux/amd64 host with an NVIDIA Quadro RTX 6000 (24 GB,
+driver 590.44.01)** running LocalAI `v4.8.2-gpu-nvidia-cuda-12`. Claims about **ROCm, Intel SYCL,
+Vulkan and Metal remain untested** — only CUDA 12 was available.
 
 ## NVIDIA on Linux
 
@@ -138,8 +140,32 @@ docker exec localai ls /backends
 ```
 
 A CPU deployment shows `cpu-llama-cpp`. An accelerated one shows a CUDA, ROCm, SYCL or
-Vulkan variant. **If you see `cpu-llama-cpp` on a GPU image, you are running on the
-CPU** — this is the single most useful check on this page.
+Vulkan variant. Verified on the CUDA host:
+
+```text
+cuda12-llama-cpp
+llama-cpp
+```
+
+**If you see `cpu-llama-cpp` on a GPU image, you are running on the CPU** — this is the single
+most useful check on this page.
+
+!!! warning "Judge by the directory, not the process name"
+    On the same verified CUDA host, the running backend process was:
+
+    ```text
+    /backends/cuda12-llama-cpp/lib/ld.so \
+      /backends/cuda12-llama-cpp/llama-cpp-cpu-all --addr 127.0.0.1:45479
+    ```
+
+    …while `nvidia-smi` attributed **3136 MiB of VRAM to that PID**. `llama-cpp-cpu-all` means
+    "**all CPU microarchitecture variants in one binary**" — ggml `dlopen`s the best
+    `libggml-cpu-*.so` at runtime — **not** "CPU-only execution". The bundle carries 13 such
+    variants alongside `libcublas` and `libcudart`.
+
+    So `ps` output showing `cpu-all` on a GPU host is normal. The **directory** name is the
+    signal. Full detail in
+    [the model runtime abstraction](../07-deep-dives/model-runtime-abstraction.md).
 
 Backends are downloaded as OCI artifacts at model-install time, and the variant is chosen
 by hardware detection *inside the container*. If the container cannot see the device at
@@ -183,7 +209,41 @@ Note that `f16: true` and `context_size` interact with VRAM here — a large con
 KV-cache memory proportional to it. The reference model's gallery config sets
 `context_size: 8192`; raising it to the model's native 32,768 quadruples that reservation.
 
-*(Source-verified from the configuration schema. Not tested.)*
+### Verified: this is how large models fit on small cards
+
+On the 24 GB host, auto-tuning set `n_gpu_layers=99999999` (all layers) and a 30B MoE model failed:
+
+```text
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 17524.43 MiB on device 0:
+cudaMalloc failed: out of memory
+```
+
+An 80B model asked for **46,297 MiB**. The working configuration keeps `gpu_layers: 999` but moves
+the **expert tensors** to system RAM:
+
+```yaml
+name: qwen3next-80b-moecpu
+backend: llama-cpp
+gpu_layers: 999
+threads: 6
+options:
+    - use_jinja:true
+    - tensor_buft_overrides:exps=CPU
+```
+
+Result: an 80B MoE model **resident on a 24 GB card**, using 3136 MiB of VRAM and roughly 46 GB of
+RSS. A selective variant offloads only blocks 16+ and adds a quantised KV cache:
+
+```yaml
+flash_attention: true
+cache_type_k: q8_0
+cache_type_v: q8_0
+options:
+    - tensor_buft_overrides:blk\.(1[6-9]|[2-9][0-9])\.ffn_.*_exps\.=CPU
+```
+
+`tensor_buft_overrides` is a llama.cpp feature passed through opaquely — it appears nowhere in
+LocalAI's Go source. Observed 2026-08-17.
 
 ## Failure modes
 
@@ -246,4 +306,5 @@ negligible. If an agent is slow, count the model calls before buying hardware.
 - [LocalAI `core/config/backend_config.go`](https://github.com/mudler/LocalAI/blob/v4.8.2/core/config/backend_config.go) — `gpu_layers`, `f16`, `context_size`.
 - [LocalAI releases](https://github.com/mudler/LocalAI/releases/tag/v4.8.2) — published assets; no Intel-Mac binary.
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) — device passthrough prerequisites.
-- Tag suffix inventory, AIO removal and staleness dates, CPU-only latency on Apple Silicon, and retrieval-hop timings: observed 2026-08-17, see [version matrix](../00-overview/version-matrix.md). **No GPU configuration was tested.**
+- Tag suffix inventory, AIO removal and staleness dates, CPU-only latency on Apple Silicon, and retrieval-hop timings: observed 2026-08-17 on darwin/arm64.
+- `cuda12-llama-cpp` installed and in use, the backend process and its VRAM attribution, the `llama-cpp-cpu-all` naming, hardware auto-tuning, the CUDA OOM figures and the two MoE offload configurations: observed 2026-08-17 on Ubuntu 24.04 amd64 with an NVIDIA Quadro RTX 6000. **ROCm, Intel, Vulkan and Metal were not tested.** See [version matrix](../00-overview/version-matrix.md).

@@ -201,7 +201,11 @@ nav:
 
   - Deep dives:
       - Memory vs knowledge: 07-deep-dives/memory-vs-knowledge.md
+      - The model runtime abstraction: 07-deep-dives/model-runtime-abstraction.md
+      - The retrieval pipeline: 07-deep-dives/retrieval-pipeline.md
+      - The agent lifecycle: 07-deep-dives/agent-lifecycle.md
       - Responses vs Chat Completions: 07-deep-dives/responses-vs-chat-completions.md
+      - OpenAI compatibility: 07-deep-dives/openai-compatibility.md
       - The security model: 07-deep-dives/security-model.md
       - Scaling: 07-deep-dives/scaling.md
 
