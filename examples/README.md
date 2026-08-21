@@ -82,7 +82,7 @@ Scripts exit non-zero on failure and say which layer failed.
 |---|---|---|
 | GPU | no GPU was available to validate against | [GPU](../docs/06-deployment/gpu.md) |
 | Kubernetes | not validated | [`kubernetes/`](../kubernetes/) |
-| Multi-agent | not validated | [Recipe 9](../docs/05-recipes/multi-agent.md) |
+| Multi-agent | validated in Recipe 9 (no script — it is pure API calls) | [Recipe 9](../docs/05-recipes/multi-agent.md) |
 | Production hardening | deliberately out of scope | [security](../docs/06-deployment/security.md) |
 
 ## Cleanup

@@ -954,6 +954,120 @@ actually looking for is `connection refused`.
 | Multi-agent delegation (Recipe 9) | **the last unvalidated recipe** |
 | ROCm, Intel SYCL, Vulkan, Metal | only CUDA 12 hardware |
 
+## Pass 7: multi-agent delegation
+
+The last unvalidated recipe. Two things were tested: the safe coordinator/specialist pattern, and
+cross-model routing.
+
+### Reading the schema first was the highest-value step
+
+```json
+{"Name": "call_agent",
+ "Properties": {"agent_name": {"enum": ["k8s-probe","mcp-probe","unit-converter","coordinator"]},
+                "message": {"type": "string"}},
+ "Description": "Use this tool to call another agent. Available agents and their roles are:\n\t- k8s-probe: …"}
+```
+
+Four findings in one response:
+
+1. The action key is `call_agents`; the **tool** is `call_agent` (singular). You configure one name
+   and read the other in `History`.
+2. `agent_name` is an **`enum`** — so an agent name **cannot be hallucinated**, the same
+   constrained-choice trick cogito uses for tool names. The `message` is unconstrained text.
+3. **With no config, all four pool agents were offered — including the coordinator itself.** This
+   is the concrete confirmation of the security claim that an unconfigured `call_agents` grants the
+   whole pool.
+4. The `Description` embeds each agent's `description` field, which was empty for the older test
+   agents. Setting `description` is how the coordinator knows what to pick — a practical detail
+   the source alone did not make obvious.
+
+Passing config straight to the definition endpoint demonstrated the control cleanly:
+
+```text
+{}                                        -> ["k8s-probe","mcp-probe","unit-converter","coordinator"]
+{"whitelist":"unit-converter"}            -> ["unit-converter"]
+{"blacklist":"k8s-probe,mcp-probe"}       -> ["unit-converter","coordinator"]
+```
+
+### Delegation worked, and a draft claim was wrong
+
+`coordinator` (only tool: `call_agents`, whitelisted) delegating to `unit-converter` (no tools):
+
+```text
+Action taken: call_agent
+Parameters: {"agent_name":"unit-converter","message":"Convert 12 kilometres to miles."}
+Result: 7.456 miles
+```
+
+Correct, and **10.6 s cold / 7.5 s warm**.
+
+The draft recipe said to verify delegation by checking "the specialist's own `History`". **That is
+empty** — because `History` records *action* results and this specialist has no actions.
+`History` is "what tools the agent called", not "what the agent did". The proof lives in the log:
+
+```text
+23:39:40 DEBUG Agent Ask()        agent=unit-converter model=qwen3-1.7b
+23:39:49 DEBUG Agent has finished agent=unit-converter
+23:39:50 DEBUG Agent has finished agent=coordinator
+```
+
+Also visible there: the specialist's own loop took ~9 s of the 10.6 s. **Most of a delegated
+request is the specialist's work, not the routing.**
+
+### The coordinator rewrites the question
+
+Not something the source made obvious. Given a prose question about requests per second, the
+coordinator delegated:
+
+```text
+{"agent_name":"deep-thinker","message":"Calculate 47 requests/second * (3*3600 + 25*60) seconds."}
+```
+
+So delegation passes a **message the coordinator composed**, not the user's text. Useful to know
+before relying on exact wording reaching a specialist.
+
+### Cross-model routing works — and did not help here
+
+`router` on qwen3-1.7b delegating to `deep-thinker` on qwen3-4b, confirmed by the `model=` field on
+each agent's `Ask()` line. **37.5 s cold, 7.8 s warm** — so the cold figure was almost entirely the
+qwen3-4b load, and cross-model overhead once resident is negligible (7.8 s vs 7.5 s same-model).
+
+The honest part: the test question (47 req/s over 3 h 25 min = **578,100**) was chosen expecting
+the 1.7B model to get it wrong. **It got it right.** So the routing *mechanism* is validated and no
+quality gap was demonstrated. Recorded as such in the recipe rather than quietly swapping in a
+question that would have failed — the pattern's value depends on a workload we did not have.
+
+### Three models resident, no eviction
+
+```text
+qwen3-1.7b 2202 MiB + granite 234 MiB + qwen3-4b 4850 MiB = 7294 MiB of 24576
+```
+
+Three backend processes coexisting. Useful counterweight to the eviction discussion in
+`scaling.md`: eviction is a **memory-pressure** behaviour, not an every-second-model rule.
+
+### Not verified
+
+Whether an **A→B→A delegation cycle** is refused. The source records the calling agent's own name,
+and the definition endpoint has no agent context so it cannot show that filtering. Testing it
+properly means risking a runaway loop on a shared GPU, which was not worth the marginal value — the
+structural answer (only one agent gets `call_agents`) makes it moot.
+
+### Still not validated after pass 7
+
+All nine recipes are now tested. What remains is environmental:
+
+| Configuration | Status |
+|---|---|
+| ROCm, Intel SYCL, Vulkan, Metal | only CUDA 12 hardware available |
+| Multi-GPU, or more than one GPU pod | one device in the cluster |
+| stdio MCP transport | needs a runtime in the image or a static binary |
+| MCP with a bearer token, or a side-effecting MCP server | not executed |
+| Delegation cycles | not tested, deliberately |
+| Ingress actually exercised | port-forward used throughout |
+| Backup and restore | documented, never executed |
+| Multiple replicas of anything | LocalAGI is a singleton by design |
+
 ## Open questions
 
 1. What populates `/api/traces/summary`? It stayed at zero throughout.

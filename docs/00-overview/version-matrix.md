@@ -266,6 +266,19 @@ tested:
       MCP over HTTP validated end to end with the time server. Both tools called
       correctly; boundary confirmed from the LocalAGI pod IP in the server's
       access log.
+
+  - pass: 7
+    date: 2026-08-17
+    versions:
+      localai: "v4.8.2-gpu-nvidia-cuda-12"
+      localagi: "v2.8.1 (image)"
+    environment:
+      platform: kubernetes, k0s v1.34.3
+      models: qwen3-1.7b and qwen3-4b, both resident
+    result: >-
+      Multi-agent delegation validated, same-model and cross-model. Whitelist
+      demonstrated narrowing the offered agent enum from 4 to 1. This completes
+      all nine recipes.
 ```
 
 | # | Configuration | Deployment | Result | Notes |
@@ -345,6 +358,16 @@ tested:
 | 73 | `convert_time` via MCP | k0s, GPU | **pass** | Europe/Rome 09:00 → America/New_York 03:00, −6.0h — correct for August |
 | 74 | MCP boundary crossing confirmed | k0s | **pass** | server logged `POST /messages/?session_id=…` from `10.244.172.216`, exactly the LocalAGI pod IP |
 | 75 | Streamable HTTP → SSE fallback | k0s | **pass (as documented)** | `mcp.go:158-166`; the `/sse` endpoint took the SSE path |
+| 76 | `call_agents` tool schema | k0s | **pass** | action key is `call_agents`, tool name is **`call_agent`**; `agent_name` is an **enum**, so an agent name cannot be hallucinated |
+| 77 | `call_agents` with **no** whitelist | k0s | **pass — and this is the risk** | enum listed **all 4** pool agents, including the coordinator itself |
+| 78 | `whitelist` filtering | k0s | **pass** | 4 agents → `["unit-converter"]` |
+| 79 | `blacklist` filtering | k0s | **pass** | `blacklist=k8s-probe,mcp-probe` → the other two remained |
+| 80 | Same-model delegation | k0s, GPU | **pass** | 12 km → 7.456 miles. **10.6 s cold, 7.5 s warm**; the specialist's own loop was ~9 s of it |
+| 81 | Specialist `History` after delegation | k0s | **empty — not a failure** | `History` records **action** results; a tool-less specialist has none. The log is the proof it ran |
+| 82 | Delegated message content | k0s | **rewritten** | the coordinator composed `"Calculate 47 requests/second * (3*3600 + 25*60) seconds."` rather than forwarding the user's prose |
+| 83 | Cross-model delegation | k0s, GPU | **pass** | log confirmed `agent=router model=qwen3-1.7b` → `agent=deep-thinker model=qwen3-4b`; **37.5 s cold, 7.8 s warm** |
+| 84 | Whether the cross-model split improved the answer | k0s, GPU | **no difference on this test** | qwen3-1.7b answered 578,100 correctly unaided, so the routing mechanism was validated but no quality gap was demonstrated |
+| 85 | Three models resident simultaneously | k0s, GPU | **pass** | qwen3-1.7b 2202 MiB + granite 234 MiB + qwen3-4b 4850 MiB = **7294 MiB**, no eviction |
 
 ### A reproduced failure worth knowing
 
@@ -387,7 +410,6 @@ Recorded honestly, because the gaps matter:
 | LocalAGI's `/api/collections` API | **not executed** — absent from v2.8.1 |
 | Standalone LocalRecall with `chromem` engine | **not executed** — only `postgres` was exercised |
 | Hybrid search weight tuning, BM25 behaviour | **not executed** — the engine was used, the weights were not varied |
-| Multi-agent delegation (`call_agents`) | **not executed** |
 | Long-term memory write-back | **not executed** — observed disabled in the log |
 | ROCm, Intel SYCL, Vulkan, Metal | **not executed** — only CUDA 12 was available |
 | GPU for LocalAGI or LocalRecall | **n/a** — neither ever uses a device |
