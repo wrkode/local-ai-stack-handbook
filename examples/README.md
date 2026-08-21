@@ -48,7 +48,7 @@ LOCALAI_URL=http://gpu-box:8080 ./01-localai/run.sh
 | [`04-agent/`](04-agent/) | [4](../docs/05-recipes/simple-agent.md) | agent creation, `/v1/responses`, conversation chaining |
 | [`05-agent-tools/`](05-agent-tools/) | [5](../docs/05-recipes/agent-with-tools.md) | tool schema, direct run, agent invocation, tool history |
 | [`06-agent-memory/`](06-agent-memory/) | [6](../docs/05-recipes/agent-with-knowledge.md) | agent + knowledge, and proof retrieval happened |
-| [`07-mcp/`](07-mcp/) | [7](../docs/05-recipes/mcp-agent.md) | MCP configuration — **not validated**, see its README |
+| [`07-mcp/`](07-mcp/) | [7](../docs/05-recipes/mcp-agent.md) | MCP over HTTP — **validated** with the `time` server; manifest included |
 | [`08-full-stack/`](08-full-stack/) | [8](../docs/05-recipes/complete-agent-stack.md) | knowledge and a tool in one request, with the trace |
 
 Run them in order. Each assumes the previous one worked, which is what makes a failure

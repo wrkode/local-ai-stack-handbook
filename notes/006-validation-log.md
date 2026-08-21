@@ -836,6 +836,124 @@ do is a prompt problem no device fixes — but it should not have been used to d
 | Ingress actually exercised | port-forward used throughout |
 | Backup and restore | documented, never executed |
 
+## Pass 6: MCP over HTTP
+
+Closed one of the two remaining unvalidated recipes. The `time` server was chosen deliberately as
+the MCP equivalent of Recipe 5's `counter`: deterministic, no credentials, no side effects, and
+verifiable arithmetic — so the recipe tests *the boundary* rather than an interesting tool.
+
+### The finding that shaped the whole recipe
+
+Before writing anything, I checked what runtimes exist inside the LocalAGI image:
+
+```text
+node MISSING    npx MISSING    python3 MISSING    uvx MISSING
+bash /usr/bin/bash   curl /usr/bin/curl   docker /usr/bin/docker   git /usr/bin/git
+```
+
+stdio MCP servers are **child processes of LocalAGI** (`exec.Command`, `mcp.go:193-198`). So the
+entire `npx @modelcontextprotocol/server-*` and `uvx mcp-server-*` ecosystem — which is most
+reference servers — **cannot run as stdio children as shipped.**
+
+That is a significant, undocumented constraint on MCP with LocalAGI, and it inverted the plan: HTTP
+transport is not merely nicer architecture here, it is the practical default.
+
+Reading the transport code also settled what LocalAGI speaks
+(`core/agent/mcp.go:158-166`, go-sdk v1.2.0): `StreamableClientTransport` first, falling back to
+`SSEClientTransport`. Either works.
+
+And a third thing surfaced that I had documented as a field but not understood:
+`mcp_prepare_script` runs `/bin/bash -c <script>` **before** MCP setup (`mcp.go:184`) — which is
+exactly the hook for installing a runtime or fetching a static binary. That is the escape hatch for
+stdio.
+
+### Dead end: mcp-proxy's own image has no uvx
+
+`mcp-server-time` is stdio-only — documented as `docker run -i`, no `--transport` flag. So a bridge
+was needed. First attempt used the obvious image with the documented invocation:
+
+```text
+args: ["--host=0.0.0.0", "--port=8080", "--", "uvx", "mcp-server-time"]
+->  FileNotFoundError: [Errno 2] No such file or directory: 'uvx'
+```
+
+`ghcr.io/sparfenyuk/mcp-proxy:v0.12.0` does not bundle `uv` either, despite its README's examples
+using `uvx`. Fixed by using `python:3.13-slim` and pip-installing both packages, then pinning the
+resolved versions: **mcp-proxy 0.12.0, mcp-server-time 2026.8.18**.
+
+Worth noting the resulting pod installs packages at startup, so it needs network at boot. Fine for
+a documented lab recipe; bake an image for anything long-lived, and the manifest says so.
+
+### Failure: discovery ordering, caught live
+
+The first agent creation raced the server rollout by four seconds:
+
+```text
+23:24:51  ERROR Failed to connect to MCP server via SSEClientTransport
+                error="dial tcp 10.96.16.69:8080: connect: connection refused"
+23:24:51  INFO  Done populating actions from MCP Servers
+23:24:51  INFO  Agent started name=mcp-probe
+23:24:55  [mcp-time] Serving MCP Servers via SSE: http://0.0.0.0:8080/sse
+```
+
+The agent **started successfully with no MCP tools** and answered requests normally without them.
+Tools are not re-discovered later; deleting and recreating the agent fixed it.
+
+This confirms a claim the recipe had made from source before this pass — "a missing MCP server is a
+startup problem" — and upgrades it from inference to observation. It also has a real operational
+consequence in Kubernetes, where pod start order is not guaranteed.
+
+### Both tools worked
+
+```text
+get_current_time {"timezone":"Asia/Tokyo"}
+  -> {"timezone":"Asia/Tokyo","datetime":"2026-08-22T08:26:14+09:00",
+      "day_of_week":"Saturday","is_dst":false}
+  agent: "The current time in Asia/Tokyo is 08:26 AM (Saturday, 22 August 2026)."   2.6 s
+
+convert_time {"source_timezone":"Europe/Rome","target_timezone":"America/New_York","time":"09:00"}
+  agent: "03:00 ... -6.0h"
+```
+
+The conversion is correct: in August Rome is UTC+2 and New York UTC−4, so six hours. Checking that
+mattered — a plausible-looking wrong answer from a 1.7B model is exactly the failure mode Recipe 5
+found, and here the arithmetic came from the tool rather than the model.
+
+### The boundary, proven not assumed
+
+Same technique as every other hop in this handbook — match identities rather than trust the story:
+
+```text
+[mcp-time] INFO: 10.244.172.216:53246 - "POST /messages/?session_id=9337da7bba…" 202 Accepted
+$ kubectl get pod -l app=localagi -o jsonpath='{...podIP}'  ->  10.244.172.216
+```
+
+Also a useful transport detail for anyone reading a server's access log: on SSE, client→server
+messages arrive as `POST /messages/?session_id=<id>` while responses go back on the open stream. So
+you look for POSTs, not GETs.
+
+### Confirmed: History does not distinguish MCP from built-in
+
+The `get_current_time` entry in `/api/agent/<name>/status` has the same shape as `counter`'s in
+Recipe 5 — no marker that one crossed a process boundary. That is the design, and it is precisely
+why MCP is a **trust** boundary rather than a **permission** boundary.
+
+### A method note
+
+`kubectl exec … curl --max-time 5 <sse-url>` exits **28 (timeout)** on success, because an SSE
+endpoint holds the connection open. I nearly recorded that as a failure. The failure you are
+actually looking for is `connection refused`.
+
+### Still not validated after pass 6
+
+| Configuration | Status |
+|---|---|
+| stdio MCP transport | not executed — needs a runtime in the image or a static binary |
+| An MCP server with side effects (filesystem, fetch) | not executed; recommended as the next step |
+| MCP with a bearer token | not executed — the server was unauthenticated |
+| Multi-agent delegation (Recipe 9) | **the last unvalidated recipe** |
+| ROCm, Intel SYCL, Vulkan, Metal | only CUDA 12 hardware |
+
 ## Open questions
 
 1. What populates `/api/traces/summary`? It stayed at zero throughout.

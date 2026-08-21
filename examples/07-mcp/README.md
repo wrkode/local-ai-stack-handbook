@@ -1,16 +1,63 @@
 # Example 7 — MCP
 
-**Not validated.** No MCP server was run during this handbook's validation, so unlike every
-other example here there is no `run.sh` that has been executed end to end. What follows is a
-configuration template derived from LocalAGI v2.9.0 source.
+**Validated** over HTTP with the `time` server on Kubernetes, 2026-08-17. The manifest is
+`mcp-time-k8s.yaml`; the walkthrough is
+[Recipe 7](../../docs/05-recipes/mcp-agent.md).
 
-The recipe is [docs/05-recipes/mcp-agent.md](../../docs/05-recipes/mcp-agent.md).
+There is still no `run.sh` here, deliberately: this example needs a *server*, and which server you
+run is a decision with security consequences that a script should not make for you.
 
-## Why there is no script
+## Why HTTP and not stdio
 
-An MCP example needs an MCP server, and any server we picked would be either a dependency you
-do not have or a security decision we should not make for you. Writing a `run.sh` that has
-never run would violate this handbook's own evidence rules.
+`mcp-server-time` speaks stdio only. LocalAGI can run stdio servers, but as **child processes of
+its own container** — and the v2.8.1 image has no runtime to run the usual ones with:
+
+```text
+node MISSING    npx MISSING    python3 MISSING    uvx MISSING
+bash /usr/bin/bash   curl /usr/bin/curl   docker /usr/bin/docker   git /usr/bin/git
+```
+
+So `npx @modelcontextprotocol/server-*` and `uvx mcp-server-*` — most reference servers — cannot
+run as stdio children as shipped. `mcp-time-k8s.yaml` therefore wraps the stdio server with
+`mcp-proxy` and serves it over SSE, which is the better shape anyway: its own lifecycle, its own
+restart, and something a NetworkPolicy can constrain.
+
+For stdio, `mcp_prepare_script` runs `/bin/bash -c <script>` before MCP setup, so it can install a
+runtime or fetch a static binary. A statically linked Go or Rust server needs none of that.
+
+## Quick start
+
+```bash
+kubectl apply -f mcp-time-k8s.yaml
+kubectl -n localai-stack rollout status deploy/mcp-time
+```
+
+Wait for it to serve **before** creating the agent — discovery happens at agent start and is not
+retried:
+
+```bash
+kubectl -n localai-stack logs deploy/mcp-time | tail -3
+```
+
+```bash
+curl -s -X POST http://localhost:18081/api/agent/create \
+  -H 'Content-Type: application/json' --data @create-http.json
+```
+
+Edit `create-http.json` first: it ships with `REPLACE-ME` placeholders. For the shipped manifest
+the URL is `http://mcp-time:8080/sse` and no token is needed.
+
+```bash
+curl -s http://localhost:18081/v1/responses -H 'Content-Type: application/json' \
+  -d '{"model":"mcp-probe","input":"What is the current time in Asia/Tokyo? Use your tools."}' \
+  | jq -r '.output[0].content[0].text'
+```
+
+```bash
+curl -s http://localhost:18081/api/agent/mcp-probe/status | jq -r '.History[]'
+```
+
+Expect `get_current_time` with `{"timezone":"Asia/Tokyo"}` and a real timestamp.
 
 ## Prerequisite
 

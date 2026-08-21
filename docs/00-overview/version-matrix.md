@@ -250,6 +250,22 @@ tested:
       GPU inference in Kubernetes. 200-token completion 6.7 s CPU -> 1.4 s GPU
       (~4.5x); agent with knowledge and a tool 23.7 s -> 2.12 s (~11x);
       2194 MiB VRAM attributed to the pod.
+
+  - pass: 6
+    date: 2026-08-17
+    versions:
+      localai: "v4.8.2-gpu-nvidia-cuda-12"
+      localagi: "v2.8.1 (image)"
+      mcp_proxy: "0.12.0"
+      mcp_server_time: "2026.8.18"
+      mcp_go_sdk: "v1.2.0 (pinned by LocalAGI)"
+    environment:
+      platform: kubernetes, k0s v1.34.3
+      transport: SSE (Streamable HTTP attempted first, fell back)
+    result: >-
+      MCP over HTTP validated end to end with the time server. Both tools called
+      correctly; boundary confirmed from the LocalAGI pod IP in the server's
+      access log.
 ```
 
 | # | Configuration | Deployment | Result | Notes |
@@ -320,6 +336,15 @@ tested:
 | 64 | GPU vs CPU, 200-token completion, same node/model/prompt | k0s, grogu | **pass** | CPU **6.67 / 6.78 s** (~30 tok/s) → GPU **1.41 / 1.50 s** (~142 tok/s) = **~4.5x** |
 | 65 | GPU vs CPU, agent with knowledge and a tool | k0s, grogu | **pass** | **23.7 s → 2.12 s ≈ 11x.** Corrected an earlier claim that a GPU helps agent latency "only partly". |
 | 66 | All 7 verify-stack layers on GPU | k0s, grogu | **pass** | agent request 4 s |
+| 67 | LocalAGI image runtimes for stdio MCP | k0s | **fail — none present** | `node`, `npx`, `python3`, `uvx` all MISSING in v2.8.1. The `npx`/`uvx` reference-server ecosystem cannot run as a stdio child as shipped. |
+| 68 | `ghcr.io/sparfenyuk/mcp-proxy:v0.12.0` wrapping `uvx mcp-server-time` | k0s | **fail** | `FileNotFoundError: [Errno 2] No such file or directory: 'uvx'` — that image does not bundle `uv` either |
+| 69 | `mcp-proxy` + `mcp-server-time` on a `python:3.13-slim` base | k0s | **pass** | serves SSE at `/sse`; resolved mcp-proxy 0.12.0, mcp-server-time 2026.8.18 |
+| 70 | MCP discovery with the server not yet serving | k0s | **fail, silently** | `Failed to connect to MCP server via SSEClientTransport … connection refused`, then `Done populating actions` and `Agent started`. Agent runs with **no MCP tools**; not retried later. |
+| 71 | MCP discovery after the server is up | k0s | **pass** | no connect error; tools populated |
+| 72 | `get_current_time` via MCP | k0s, GPU | **pass** | `{"timezone":"Asia/Tokyo"}` → `2026-08-22T08:26:14+09:00`, Saturday, `is_dst false`. **2.6 s** |
+| 73 | `convert_time` via MCP | k0s, GPU | **pass** | Europe/Rome 09:00 → America/New_York 03:00, −6.0h — correct for August |
+| 74 | MCP boundary crossing confirmed | k0s | **pass** | server logged `POST /messages/?session_id=…` from `10.244.172.216`, exactly the LocalAGI pod IP |
+| 75 | Streamable HTTP → SSE fallback | k0s | **pass (as documented)** | `mcp.go:158-166`; the `/sse` endpoint took the SSE path |
 
 ### A reproduced failure worth knowing
 
@@ -362,7 +387,6 @@ Recorded honestly, because the gaps matter:
 | LocalAGI's `/api/collections` API | **not executed** — absent from v2.8.1 |
 | Standalone LocalRecall with `chromem` engine | **not executed** — only `postgres` was exercised |
 | Hybrid search weight tuning, BM25 behaviour | **not executed** — the engine was used, the weights were not varied |
-| MCP servers, of any kind | **not executed** |
 | Multi-agent delegation (`call_agents`) | **not executed** |
 | Long-term memory write-back | **not executed** — observed disabled in the log |
 | ROCm, Intel SYCL, Vulkan, Metal | **not executed** — only CUDA 12 was available |

@@ -2,9 +2,9 @@
 
 ## Goal
 
-Give the agent a capability that lives **outside** its process, reached over the Model
-Context Protocol. Recipe 5's tool was a Go function call; this one crosses a boundary
-you can firewall, audit and get wrong.
+Give the agent a capability that lives **outside its process**, reached over the Model Context
+Protocol. Recipe 5's tool was a Go function call inside LocalAGI; this one crosses a boundary you
+can firewall, restart and audit independently.
 
 ## Architecture
 
@@ -14,185 +14,281 @@ you can firewall, audit and get wrong.
         +-------------+-------------+
         |                           |
    built-in action            MCP server
-   (in-process)          (subprocess or HTTP)
+   (in-process)              (its own pod)
 ```
 
 ```mermaid
 flowchart TB
   U["client"]
-  subgraph AG["localagi process"]
+  subgraph AG["localagi pod"]
     LOOP["agent loop"]
     BI["built-in actions<br/>40, in-process"]
-    MC["MCP client"]
+    MC["MCP client<br/>go-sdk v1.2.0"]
   end
-  subgraph LAI["local-ai process"]
+  subgraph MT["mcp-time pod"]
+    PX["mcp-proxy<br/>SSE endpoint"]
+    TS["mcp-server-time<br/>stdio child"]
+  end
+  subgraph LAI["local-ai pod"]
     CHAT["/chat/completions"]
   end
-  M1["MCP server<br/>stdio: child process"]
-  M2["MCP server<br/>HTTP: another host"]
   U -->|"HTTP /v1/responses"| LOOP
   LOOP -.->|in-process| BI
   LOOP -.->|in-process| MC
-  MC -->|"stdio pipes"| M1
-  MC -->|"HTTP + bearer token"| M2
+  MC -->|"SSE + POST /messages/"| PX
+  PX -.->|"stdio pipes"| TS
   LOOP -->|"HTTP"| CHAT
 ```
+
+Note the two hops on the right. LocalAGI speaks HTTP to `mcp-proxy`; `mcp-proxy` speaks stdio to
+the actual server. The reason for that bridge is the most practical finding in this recipe.
 
 ## What you will learn
 
 - MCP is a **transport and discovery** mechanism, not a decision-maker
-- the two transports LocalAGI supports, and how differently they fail
-- tools are discovered at agent start, so a missing server is a startup problem
-- why every MCP server is a trust boundary
+- which transport LocalAGI actually speaks, and its fallback
+- why the `npx`/`uvx` reference-server ecosystem cannot run as a stdio child of LocalAGI
+- that tool discovery happens at **agent start**, so a server that is not up yet leaves the agent
+  silently short of tools
+- that MCP tools are indistinguishable from built-in actions once the model sees them
 
 ## Components
 
-| Component | Role |
-|---|---|
-| LocalAI | inference |
-| LocalAGI | agent loop, MCP **client** |
-| An MCP server | the external capability |
+| Component | Role | Port |
+|---|---|---|
+| LocalAI | inference | 8080 |
+| LocalAGI | agent loop, MCP **client** | 3000 |
+| `mcp-proxy` | stdio → SSE bridge | 8080 |
+| `mcp-server-time` | the capability: `get_current_time`, `convert_time` | stdio child |
 
 ## Prerequisites
 
-- Recipe 5 completed. Tool calling must already work, because this recipe changes only
-  *where the tool lives*
-- An MCP server you trust
+- [Recipe 5](agent-with-tools.md) completed. MCP changes only *where* a tool lives, so debug
+  tool calling with a built-in action first
+- A running stack. This recipe was validated on Kubernetes; the same agent configuration works
+  under Compose with the MCP server as another service
 
 ## Versions tested
 
-> **Not yet validated.** No MCP server was run. The configuration below is derived from
-> LocalAGI v2.9.0 source and its configuration schema; the commands have not been
-> executed end to end. Every other recipe in this path was executed — this one is the
-> exception, and it is marked rather than implied. See the
-> [version matrix](../00-overview/version-matrix.md#not-yet-validated).
+```yaml
+tested:
+  date: 2026-08-17
+versions:
+  localai: "v4.8.2-gpu-nvidia-cuda-12"
+  localagi: "v2.8.1 (image)"
+  mcp_proxy: "0.12.0"
+  mcp_server_time: "2026.8.18"
+  mcp_go_sdk: "v1.2.0 (pinned by LocalAGI)"
+environment:
+  platform: kubernetes, k0s v1.34.3
+  node: bare metal amd64, NVIDIA Quadro RTX 6000
+  transport: SSE (Streamable HTTP attempted first, then fell back)
+results:
+  tool_discovery: pass
+  get_current_time: pass — 2.6 s
+  convert_time: pass
+  cross_pod_boundary_confirmed: yes
+```
 
 ## Start the environment
 
+The MCP server runs as its own workload:
+
 ```bash
-cd compose
-docker compose up -d
+kubectl apply -f examples/07-mcp/mcp-time-k8s.yaml
 ```
+
+```bash
+kubectl -n localai-stack rollout status deploy/mcp-time
+```
+
+!!! warning "Why a bridge, and not just `cmd: npx ...`"
+    `mcp-server-time` speaks **stdio only** — its documented invocation is `docker run -i`, and it
+    has no `--transport` flag. LocalAGI *can* run stdio servers, but as **child processes of its
+    own container**, and the v2.8.1 image contains no runtime to run them with:
+
+    ```text
+    node MISSING    npx MISSING    python3 MISSING    uvx MISSING
+    bash /usr/bin/bash   curl /usr/bin/curl   docker /usr/bin/docker   git /usr/bin/git
+    ```
+
+    So the whole `npx @modelcontextprotocol/server-*` and `uvx mcp-server-*` ecosystem — which is
+    most reference servers — **cannot run as a stdio child of LocalAGI as shipped.**
+
+    Three ways out, in preference order:
+
+    | Approach | Trade-off |
+    |---|---|
+    | **Bridge to HTTP**, as here | server gets its own lifecycle and is network-policyable. Recommended |
+    | `mcp_prepare_script` | runs `/bin/bash -c <script>` **before** MCP setup, so it can install a runtime or fetch a static binary into the container |
+    | Custom LocalAGI image | adds a build step you now own |
+
+    A statically linked Go or Rust MCP server needs none of this and works as a stdio child
+    directly.
 
 ## Verify each dependency
 
-**1. Tool calling already works.** Do not debug MCP against an agent that cannot call a
-local tool. Complete [Recipe 5](agent-with-tools.md) first and confirm:
+**1. Tool calling already works.** Do not debug MCP against an agent that cannot call a local
+tool.
 
 ```bash
-curl -s http://localhost:8081/api/agent/tool-probe/status | jq -r '.History[]'
+curl -s http://localhost:18081/api/agent/tool-probe/status | jq -r '.History[]'
 ```
 
-**2. The MCP server runs on its own.** For a stdio server, run the exact command
-LocalAGI will run, by hand, in the same environment:
+**2. The MCP server is serving.** Its own log states the endpoint:
 
 ```bash
-docker exec localagi <your-mcp-command> --help
+kubectl -n localai-stack logs deploy/mcp-time | tail -5
 ```
 
-The binary must exist **inside the LocalAGI container**. This is the single most common
-MCP failure: a command that works on your host and is absent in the image.
+```text
+mcp-proxy                 0.12.0
+mcp-server-time           2026.8.18
+[I] Serving MCP Servers via SSE:
+[I]   - http://0.0.0.0:8080/sse
+INFO:     Uvicorn running on http://0.0.0.0:8080
+```
 
-**3. For an HTTP server, that it answers from inside the container:**
+**3. It is reachable from the agent's pod**, which is where DNS and NetworkPolicy apply:
 
 ```bash
-docker exec localagi curl -s -o /dev/null -w '%{http_code}\n' http://<mcp-host>:<port>/
+kubectl -n localai-stack exec deploy/localagi -- curl -s --max-time 5 http://mcp-time:8080/sse
 ```
+
+An SSE endpoint holds the connection open, so **`curl` exiting with code 28 (timeout) is success
+here.** A `connection refused` is the failure you are looking for.
 
 ## Configure the system
 
-Two transports, two config keys. They are separate lists and an agent may use both.
-
-**HTTP transport** — `mcp_servers`, taking `url` and `token`:
+**Create the agent only after the server is serving** — see the note below.
 
 ```bash
-curl -s -X POST http://localhost:8081/api/agent/create \
+curl -s -X POST http://localhost:18081/api/agent/create \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "mcp-probe",
     "model": "qwen3-1.7b",
-    "system_prompt": "You use external tools when asked. Be terse.",
+    "system_prompt": "You use external tools when asked. Be terse and factual.",
     "strip_thinking_tags": true,
-    "mcp_servers": [
-      {"url": "http://mcp-example:9090", "token": "<bearer-token>"}
-    ],
+    "mcp_servers": [{"url": "http://mcp-time:8080/sse"}],
     "max_attempts": 1
-  }' | jq
+  }'
 ```
 
-**stdio transport** — `mcp_stdio_servers`, taking `cmd`, `args`, `env` and an optional
-`name`:
+`mcp_servers` takes `{url, token}`. `token` is omitted here because the server is unauthenticated
+on an internal network; when you set it, remember it is stored **in plain text** in the agent's
+JSON on disk.
 
-```bash
-curl -s -X POST http://localhost:8081/api/agent/create \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "mcp-stdio-probe",
-    "model": "qwen3-1.7b",
-    "strip_thinking_tags": true,
-    "mcp_stdio_servers": [
-      {"name": "files", "cmd": "/usr/local/bin/mcp-filesystem",
-       "args": ["--root", "/data/readonly"], "env": ["LOG_LEVEL=info"]}
-    ],
-    "max_attempts": 1
-  }' | jq
+The stdio form is a separate list:
+
+```json
+"mcp_stdio_servers": [{"name": "files", "cmd": "/usr/local/bin/server", "args": ["--root", "/data"], "env": ["LOG_LEVEL=info"]}]
 ```
-
-`<bearer-token>`, the command path and the args are environment-specific. `cmd` must be
-resolvable inside the LocalAGI container.
 
 | Transport | Field | Server lifetime | Fails as |
 |---|---|---|---|
-| HTTP | `mcp_servers` | independent of the agent | connection refused, 401, timeout |
+| HTTP | `mcp_servers` | independent | connection refused, 401, timeout |
 | stdio | `mcp_stdio_servers` | **child process of LocalAGI** | exec failure, immediate exit, protocol error |
 
-The lifetime difference is the practical one. A stdio server is a subprocess LocalAGI
-spawns and pipes to; if it exits, its tools vanish and there is nothing to restart
-independently. An HTTP server is a service with its own lifecycle.
+!!! danger "Discovery happens at agent start — ordering is load-bearing"
+    We hit this on the first attempt. The agent was created at `23:24:51`; the MCP server only
+    began serving at `23:24:55`, four seconds later. Result:
+
+    ```text
+    ERROR Failed to connect to MCP server via SSEClientTransport
+          server="{URL:http://mcp-time:8080/sse Token:}"
+          error="dial tcp 10.96.16.69:8080: connect: connection refused"
+    INFO  Done populating actions from MCP Servers
+    INFO  Agent started name=mcp-probe
+    ```
+
+    Note the last two lines: the agent **started successfully with no MCP tools**, and answered
+    requests normally without them. The error is logged at ERROR level, but nothing fails.
+
+    Tools are not re-discovered later. **Delete and recreate the agent** after the server is up:
+
+    ```bash
+    curl -s -X DELETE http://localhost:18081/api/agent/mcp-probe
+    ```
 
 ## Run the request
 
+Ask for something the model cannot know without the tool:
+
 ```bash
-curl -s http://localhost:8081/v1/responses \
+curl -s http://localhost:18081/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model": "mcp-probe", "input": "<a request that requires the MCP tool>"}' \
+  -d '{"model":"mcp-probe","input":"What is the current time in Asia/Tokyo? Use your tools."}' \
   | jq -r '.output[0].content[0].text'
 ```
 
-Then check what ran — the same endpoint as Recipe 5, because MCP tools appear alongside
-built-in ones:
+Then read what actually ran:
 
 ```bash
-curl -s http://localhost:8081/api/agent/mcp-probe/status | jq -r '.History[]'
+curl -s http://localhost:18081/api/agent/mcp-probe/status | jq -r '.History[]'
 ```
 
 ## Expected result
 
-An answer that could only come from the external capability, and a `History` entry
-naming the MCP tool with its arguments and result.
+```text
+The current time in Asia/Tokyo is **08:26 AM** (Saturday, 22 August 2026).
+No daylight saving time adjustments are in effect.
+```
 
-The important structural point: **`History` does not distinguish MCP tools from built-in
-actions.** By the time the agent chooses, both are just tools with JSON schemas. That is
-the design — and it is why the next section matters.
+Latency **2.6 s** on a GPU-backed LocalAI. And the history:
+
+```text
+Reasoning:
+			Action taken: get_current_time
+			Parameters: {"timezone":"Asia/Tokyo"}
+			Result: {
+			  "timezone": "Asia/Tokyo",
+			  "datetime": "2026-08-22T08:26:14+09:00",
+			  "day_of_week": "Saturday",
+			  "is_dst": false
+```
+
+The second tool works the same way:
+
+```bash
+curl -s http://localhost:18081/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mcp-probe","input":"Convert 09:00 from Europe/Rome to America/New_York using your tools."}' \
+  | jq -r '.output[0].content[0].text'
+```
+
+Observed: `03:00`, a `-6.0h` difference — correct for August, when Rome is UTC+2 and New York is
+UTC−4.
+
+!!! note "`History` does not distinguish MCP tools from built-in actions"
+    Compare that entry with [Recipe 5's](agent-with-tools.md#expected-result) `counter` entry: same
+    shape, same fields, no marker saying one crossed a process boundary and the other did not.
+
+    That is the design. By the time the model chooses, both are just tools with JSON schemas — and
+    it is also why MCP is a **trust** boundary and not a **permission** boundary.
 
 ## What happened internally
 
-1. At agent start, LocalAGI connects to each configured MCP server and calls the
-   protocol's tool-listing method. *(subprocess spawn, or network HTTP)*
-2. Each discovered tool is wrapped as an ordinary agent action with the schema the
-   server advertised. *(in-process)*
-3. On a request, the wrapped MCP tools are offered to the model **in the same list** as
-   the 40 built-in actions. *(in-process)*
-4. The loop calls `/chat/completions` with the combined tool list. **(network HTTP →
-   gRPC)**
-5. The model selects a tool by name. It cannot tell MCP tools from local ones.
-6. If the selection is an MCP tool, the wrapper issues an MCP tool-call over that
-   server's transport. **(stdio pipes, or network HTTP)**
-7. The result is appended as an observation. *(in-process)*
-8. The loop continues, exactly as in Recipe 5.
+1. At agent start, LocalAGI constructs an MCP client and tries
+   **`StreamableClientTransport`** against the configured URL. *(network HTTP)*
+2. That fails against this `/sse` endpoint, so it falls back to **`SSEClientTransport`**.
+   *(network HTTP)* — `core/agent/mcp.go:158-166`
+3. It opens an SSE stream and lists the server's tools. `mcp-proxy` forwards the request over
+   stdio pipes to `mcp-server-time`. *(stdio, inside the mcp-time pod)*
+4. Each discovered tool is wrapped as an ordinary agent action carrying the schema the server
+   advertised. Logged: `Done populating actions from MCP Servers`. *(in-process)*
+5. On a request, the wrapped MCP tools are offered to the model **in the same list** as the 40
+   built-in actions. *(in-process)*
+6. The loop calls `/chat/completions`. **(network HTTP → gRPC)**
+7. The model emits `get_current_time{timezone: "Asia/Tokyo"}`. It cannot tell this tool is remote.
+8. The wrapper issues an MCP tool call. On the SSE transport, client→server messages go as
+   **`POST /messages/?session_id=<id>`** while responses arrive on the open stream.
+   **(network HTTP)**
+9. `mcp-proxy` relays it over stdio; the server answers with JSON. *(stdio)*
+10. The result is appended as an observation and the loop continues. *(in-process)*
 
-*(Not traced. Steps 1–8 are derived from `core/agent/mcp.go` and the action-assembly
-path; no MCP server was run.)*
+Steps 1–4 were confirmed from LocalAGI's log and the source; step 8 from the server's access log
+(below). The internal stdio framing between proxy and server was **not** traced.
 
 ## Request flow
 
@@ -200,26 +296,29 @@ path; no MCP server was run.)*
 sequenceDiagram
   participant C as client
   participant AG as LocalAGI
-  participant M as MCP server
+  participant PX as mcp-proxy
+  participant TS as mcp-server-time
   participant AI as LocalAI
-  participant BE as backend
 
-  Note over AG,M: at agent start
-  AG->>M: connect + list tools
-  M-->>AG: tool schemas
-  Note over AG: wrap as actions alongside<br/>the 40 built-ins
+  Note over AG,TS: at agent start
+  AG->>PX: StreamableClientTransport connect
+  PX--xAG: fails
+  AG->>PX: SSEClientTransport connect
+  PX->>TS: spawn / stdio
+  AG->>PX: list tools
+  PX->>TS: list tools (stdio)
+  TS-->>PX: get_current_time, convert_time
+  PX-->>AG: tool schemas
 
   C->>AG: POST /v1/responses
   AG->>AI: POST /chat/completions (all tools offered)
-  AI->>BE: gRPC Predict
-  BE-->>AI: tool call by name
-  AI-->>AG: tool call
-  AG->>M: MCP tool call (stdio or HTTP)
-  M-->>AG: result
+  AI-->>AG: get_current_time{Asia/Tokyo}
+  AG->>PX: POST /messages/?session_id=…
+  PX->>TS: tool call (stdio)
+  TS-->>PX: {"datetime":"2026-08-22T08:26:14+09:00",…}
+  PX-->>AG: result on the SSE stream
   AG->>AI: POST /chat/completions (with observation)
-  AI->>BE: gRPC Predict
-  BE-->>AI: prose
-  AI-->>AG: final text
+  AI-->>AG: prose
   AG-->>C: Responses envelope
 ```
 
@@ -227,125 +326,142 @@ sequenceDiagram
 
 | What | Written by | Where | Survives restart |
 |---|---|---|---|
-| MCP server configuration | LocalAGI pool | `/pool` JSON, **including tokens** | yes |
-| Discovered tool schemas | LocalAGI, in memory | memory | no — re-discovered at start |
-| Whatever the MCP server changed | **the MCP server** | wherever it stores things | **outside this stack entirely** |
+| MCP server configuration | LocalAGI pool | `/pool` JSON, **including any token in plain text** | yes |
+| Discovered tool schemas | LocalAGI, in memory | memory | **no** — re-discovered at agent start |
+| Whatever the MCP tool changed | **the MCP server** | wherever it stores things | **outside this stack** |
 
-The last row is the security-relevant one. Side effects of MCP tools are not this
-stack's state and not in its backups. An agent that opened a GitHub issue has changed
-something no `docker compose down -v` will undo.
-
-The first row matters too: **bearer tokens are stored in the agent's JSON on disk**, in
-plain text. Treat `localagi-pool` as a secret-bearing volume.
+The `time` server is stateless, which is part of why it is the right first MCP server. A server
+that writes things puts its side effects outside your backups and outside
+`kubectl delete namespace` — see [security](../06-deployment/security.md).
 
 ## Logs worth inspecting
 
 ```bash
-docker logs localagi 2>&1 | grep -i mcp
+kubectl -n localai-stack logs deploy/localagi | grep -iE 'mcp|Failed to connect'
 ```
 
-Connection and discovery at startup. Absence of these lines means no MCP server was
-reached and the agent silently has fewer tools.
+The discovery result. `Failed to connect to MCP server via …` means this agent has fewer tools than
+you think.
 
 ```bash
-docker logs localagi 2>&1 | grep -i -E 'action|tool' | tail -20
+kubectl -n localai-stack logs deploy/mcp-time | grep -E 'POST|session'
 ```
 
-Dispatch.
+The other side of the boundary — and the proof it was crossed:
+
+```text
+INFO: 10.244.172.216:53246 - "POST /messages/?session_id=9337da7bba…" 202 Accepted
+```
+
+`10.244.172.216` is the LocalAGI pod's IP:
 
 ```bash
-curl -s http://localhost:8081/api/agent/mcp-probe/status | jq -r '.History[]'
+kubectl -n localai-stack get pod -l app=localagi -o jsonpath='{.items[0].status.podIP}'
 ```
 
-Ground truth for what ran.
+Matching those two is how you prove the hop happened rather than assuming it.
+
+```bash
+curl -s http://localhost:18081/api/agent/mcp-probe/status | jq -r '.History[]'
+```
+
+Ground truth for arguments and results — last ten only, in memory.
 
 ## Failure modes
 
-**The agent has no MCP tools and says so vaguely.**
+**The agent has no MCP tools and answers vaguely.**
 
-- *Symptom:* generic answers, no MCP lines in the log, `History` empty.
-- *Cause:* discovery failed at agent start.
-- *Check:* `docker logs localagi 2>&1 | grep -i mcp`
-- *Fix:* for stdio, confirm `cmd` exists **in the container**; for HTTP, confirm the URL
-  resolves from inside the container.
+- *Symptom:* plausible answers, empty `History`, no MCP lines in the log.
+- *Cause:* discovery failed at agent start — most often the server was not up yet.
+- *Check:* `kubectl -n localai-stack logs deploy/localagi | grep -i mcp`
+- *Fix:* bring the server up, then **delete and recreate the agent**. Restarting the agent's pod
+  also re-runs discovery.
+
+**`connection refused` in the discovery error.**
+
+- *Cause:* wrong Service name or port, or the server not listening on `0.0.0.0`.
+- *Check:* `kubectl -n localai-stack exec deploy/localagi -- curl -s --max-time 5 <url>`
+- *Fix:* `mcp-proxy` defaults to `127.0.0.1`; it needs `--host=0.0.0.0` to be reachable from
+  another pod.
+
+**`FileNotFoundError: 'uvx'` in the MCP server's log.**
+
+- *Cause:* we hit this. The `ghcr.io/sparfenyuk/mcp-proxy` image does **not** bundle `uv`/`uvx`,
+  so `mcp-proxy … uvx mcp-server-time` cannot spawn its child.
+- *Fix:* use a base image that has the runtime and install both packages, as the shipped manifest
+  does.
 
 **stdio server exits immediately.**
 
-- *Symptom:* tools present briefly, then gone; or never present.
-- *Cause:* the command failed — wrong path, missing runtime, bad args, or it wrote to
-  stdout in a way that broke the protocol framing.
-- *Check:* run the exact command with `docker exec`.
-- *Fix:* note that **stdout is the protocol channel**. An MCP server that logs to stdout
-  corrupts the stream. Its diagnostics must go to stderr.
+- *Cause:* `cmd` not present in the LocalAGI container — the usual case, given no node or python.
+- *Fix:* bridge to HTTP, use `mcp_prepare_script`, or use a static binary. Note that **stdout is
+  the protocol channel**: a server that logs to stdout corrupts the stream, so its diagnostics must
+  go to stderr.
 
-**HTTP server returns 401.**
+**401 from an HTTP server.**
 
-- *Cause:* `token` wrong or absent.
-- *Check:* `docker exec localagi curl -H 'Authorization: Bearer <token>' <url>`
-- *Fix:* correct the token in the agent config, not in the environment — it is
-  per-server.
+- *Cause:* `token` wrong or absent. It is per-server, not global.
+- *Fix:* set `token` in that entry of `mcp_servers`.
 
 **The model never chooses the MCP tool.**
 
-- *Cause:* the same small-model limitation as Recipe 5, not an MCP problem. The tool
-  description the *server* advertises is what the model sees, and you may not control
-  it.
-- *Fix:* verify with a built-in tool first; try a larger model; if the server's tool
-  descriptions are poor there is little you can do from this side.
-
-**Tool call times out and the agent hangs.**
-
-- *Cause:* MCP calls happen inside the agent loop; a slow server extends the whole
-  request.
-- *Fix:* raise client and proxy timeouts, and prefer MCP servers with their own internal
-  timeouts.
+- *Cause:* the same small-model limitation as Recipe 5, not an MCP problem. Note the tool
+  *description* comes from the **server**, so you may not control it.
+- *Fix:* verify with a built-in tool first; say "use your tools" in the prompt; try a larger model.
 
 ## Troubleshooting
 
 1. **Does inference work?** LocalAI directly
 2. **Does a built-in tool work?** Recipe 5's `counter`
-3. **Does the MCP server run standalone?** by hand, inside the container
-4. **Did LocalAGI discover its tools?** the MCP log lines
-5. **Did the model select the tool?** `History`
-6. **Did the tool return or hang?** compare request duration against the server's own
-   log
+3. **Is the MCP server serving?** its own log, and the endpoint it prints
+4. **Is it reachable from the agent's pod?** `exec … curl` — timeout means success on SSE
+5. **Did LocalAGI discover the tools?** the MCP log lines
+6. **Did the model select one?** `History`
+7. **Did the server see the call?** its access log, matched against the agent's pod IP
 
-Step 2 is the one that saves time: if a local tool does not work, MCP cannot.
-
-More: [MCP](../02-localagi/mcp.md) · [security](../06-deployment/security.md).
+Step 2 is the one that saves the most time: if a local tool does not work, MCP cannot.
 
 ## Cleanup
 
 ```bash
-curl -s -X DELETE http://localhost:8081/api/agent/mcp-probe | jq
+curl -s -X DELETE http://localhost:18081/api/agent/mcp-probe
 ```
 
-Deleting the agent stops any stdio child process and stops HTTP calls. It does **not**
-undo anything the MCP tools did — that is outside this stack.
+```bash
+kubectl delete -f examples/07-mcp/mcp-time-k8s.yaml
+```
+
+Deleting the agent stops any stdio child process and stops HTTP calls. It does **not** undo
+anything an MCP tool did elsewhere — with `time` there is nothing to undo, which is the point of
+starting here.
 
 ## Variations
 
-**Both transports on one agent.** `mcp_servers` and `mcp_stdio_servers` are independent
-lists; tools from both merge into the same offered set.
+**Both transports on one agent.** `mcp_servers` and `mcp_stdio_servers` are independent lists;
+tools from both merge into the same offered set.
 
-**LocalAI as an MCP *server*.** LocalAI v4.8.2 hosts an MCP server in-process and, on a
-stock container, logs **36 tools registered, writable by default** — exposing its own
-administration surface to any MCP client. This is the opposite direction to everything
-above and is unrelated except in name. An agent given LocalAI's MCP endpoint can
-administer the model runtime it is running on. Read
-[security](../06-deployment/security.md) before doing this deliberately, and check
-whether you are doing it accidentally.
+**Constrain a server that can actually do damage.** Swap `time` for a filesystem server mounted
+**read-only**, then ask the agent to write a file. It fails at the boundary, not in the prompt —
+which is the whole argument of
+[the security model](../07-deep-dives/security-model.md). MCP has no permission model of its own:
+if the model can name the tool, it can call it with arguments it chose.
 
-**Restrict what a server can reach.** MCP has no permission model of its own: if the
-model can name the tool, it can call it with arguments it chose. Constrain at the
-boundary instead — a read-only root for a filesystem server, a scoped token for an API
-server, network policy for an HTTP server. See
-[security model](../07-deep-dives/security-model.md).
+**Demonstrate indirect prompt injection.** Point a `fetch`-style server at a page **you control**
+that contains instructions, and watch them reach the model as tool output. Worth doing once, on a
+throwaway deployment, because it makes the threat concrete. Do not leave it enabled.
+
+**LocalAI as an MCP *server*.** LocalAI v4.8.2 logs
+`LocalAI Assistant in-memory MCP server initialised tools=36 read_only=false` — 36 administrative
+tools over the model runtime, not read-only. We probed `/mcp`, `/api/mcp` and `/mcp/sse` and all
+returned 404, so we found no default external path; treat it as a privilege surface for LocalAI's
+own Assistant rather than something you connect an agent to.
 
 ## Upstream references
 
-- [LocalAGI `core/agent/mcp.go`](https://github.com/mudler/LocalAGI/blob/v2.9.0/core/agent/mcp.go) — `MCPServer{url, token}` at 22-25, `MCPSTDIOServer{name, cmd, args, env}` at 27-32, and the wrapper that turns an MCP tool into an agent action at 34+. Validated against v2.9.0.
+- [LocalAGI `core/agent/mcp.go`](https://github.com/mudler/LocalAGI/blob/v2.9.0/core/agent/mcp.go) — `MCPServer{url, token}` at 22-25 and `MCPSTDIOServer{name, cmd, args, env}` at 27-32; `StreamableClientTransport` then `SSEClientTransport` fallback at 158-166; `mcp_prepare_script` via `/bin/bash -c` at 184; `exec.Command` + `CommandTransport` for stdio at 193-198. Validated against v2.9.0.
 - [LocalAGI `core/state/config.go`](https://github.com/mudler/LocalAGI/blob/v2.9.0/core/state/config.go) — `mcp_servers`, `mcp_stdio_servers`, `mcp_prepare_script`.
+- [LocalAGI `go.mod`](https://github.com/mudler/LocalAGI/blob/v2.9.0/go.mod) — `github.com/modelcontextprotocol/go-sdk v1.2.0`.
 - [Model Context Protocol specification](https://modelcontextprotocol.io) — transports, tool discovery, and why stdout is the protocol channel.
-- [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk) — the client LocalAGI uses.
-- LocalAI's in-process MCP server, 36 tools registered and writable by default: observed 2026-08-17, see [version matrix](../00-overview/version-matrix.md).
+- [`mcp-server-time`](https://github.com/modelcontextprotocol/servers/tree/main/src/time) — `get_current_time`, `convert_time`, `--local-timezone`; stdio only.
+- [`sparfenyuk/mcp-proxy`](https://github.com/sparfenyuk/mcp-proxy) — the stdio→SSE bridge, `--host`, `--port`, `/sse`.
+- Absence of node/npx/python3/uvx in the LocalAGI v2.8.1 image; the discovery-ordering failure and its log lines; the `uvx` FileNotFoundError; both tool calls and their results; the `POST /messages/?session_id=` access-log lines matched to the LocalAGI pod IP: observed 2026-08-17, see [version matrix](../00-overview/version-matrix.md).

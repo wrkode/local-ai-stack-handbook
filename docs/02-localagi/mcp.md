@@ -42,6 +42,35 @@ the API rewrites an array into a string. Both UI fields are textareas.
 configuration, which on an unauthenticated deployment means arbitrary shell
 execution driven by an HTTP request.
 
+!!! danger "The image has no runtime for the usual stdio servers"
+    Verified inside LocalAGI v2.8.1:
+
+    ```text
+    node MISSING    npx MISSING    python3 MISSING    uvx MISSING
+    bash /usr/bin/bash   curl /usr/bin/curl   docker /usr/bin/docker   git /usr/bin/git
+    ```
+
+    Most reference MCP servers ship as `npx @modelcontextprotocol/server-*` or
+    `uvx mcp-server-*`, so **they cannot run as stdio children of LocalAGI as shipped.**
+
+    Options: bridge the server to HTTP and use `mcp_servers` (recommended — it also gives the
+    server its own lifecycle); use `mcp_prepare_script` to install a runtime or fetch a static
+    binary first; build a custom image; or choose a statically linked Go/Rust server, which needs
+    none of this.
+
+    Validated end to end with the HTTP bridge in
+    [Recipe 7](../05-recipes/mcp-agent.md).
+
+### Which HTTP transport
+
+LocalAGI tries **`StreamableClientTransport`** first and falls back to **`SSEClientTransport`**
+(`core/agent/mcp.go:158-166`, go-sdk v1.2.0). So either works, and a legacy SSE-only server is
+fine — the fallback was exercised in Recipe 7.
+
+On the SSE transport, client→server messages go as `POST /messages/?session_id=<id>` while
+responses arrive on the open stream. That is what you look for in a server's access log to prove
+the boundary was crossed.
+
 ## Transports, and the order they are tried
 
 | Transport | When it is used | Fallback behaviour |
