@@ -1,0 +1,48 @@
+# Fetch a large GGUF directly into the model volume.
+#
+# Why a Job rather than LocalAI's own /models/apply: the gallery install runs
+# inside the LocalAI process, so a 45 GiB download holds a request open for the
+# whole transfer and any restart begins again from zero. A Job resumes (curl -C -),
+# is watchable with `kubectl logs -f`, and leaves LocalAI serving throughout.
+#
+# The volume is ReadWriteOnce, which permits multiple pods on the SAME node. The
+# nodeSelector is what makes that true — without it this Job can land elsewhere and
+# stay Pending forever with a volume-attach error.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fetch-qwen3next-80b
+  namespace: localai-stack
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector: { nvidia.com/gpu.present: "true" }
+      # curlimages/curl runs as uid 100; a local-path volume arrives root-owned, so
+      # mkdir fails with "Permission denied" before the transfer starts. The same
+      # trap as PostgreSQL needing fsGroup on a fresh Longhorn volume. Root here
+      # also matches the ownership LocalAI's own downloads create.
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: fetch
+          image: curlimages/curl:8.11.1
+          command: ["sh","-c"]
+          args:
+            - |
+              set -e
+              F=/models/llama-cpp/models/Qwen_Qwen3-Next-80B-A3B-Thinking-Q4_K_M.gguf
+              mkdir -p "$(dirname "$F")"
+              echo "target: $F"
+              # -C - resumes a partial file, so a retried Job does not restart at 0
+              curl -fL -C - --retry 5 --retry-delay 10 -o "$F" \
+                https://huggingface.co/bartowski/Qwen_Qwen3-Next-80B-A3B-Thinking-GGUF/resolve/main/Qwen_Qwen3-Next-80B-A3B-Thinking-Q4_K_M.gguf
+              ls -l "$F"
+              echo "expected sha256: 83481c75cc6c0837ba9afa52b59b4cd3f85f55dd7aa6c60e27230ff329c81367"
+              sha256sum "$F"
+          volumeMounts:
+            - { name: models, mountPath: /models }
+      volumes:
+        - name: models
+          persistentVolumeClaim: { claimName: localai-models-large }

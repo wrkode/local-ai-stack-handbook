@@ -243,7 +243,18 @@ options:
 ```
 
 `tensor_buft_overrides` is a llama.cpp feature passed through opaquely — it appears nowhere in
-LocalAI's Go source. Observed 2026-08-17.
+LocalAI's Go source. Observed 2026-08-17. Because it is not validated, a typo is silently
+ignored and the symptom is an out-of-memory rather than a complaint.
+
+!!! note "Under Kubernetes the model YAML is not the hard part"
+    The same configuration was reproduced on k0s at **3168 MiB VRAM and 25.0 tok/s**, but two
+    Kubernetes defaults have to be changed first, and neither is a LocalAI setting: the pod's
+    `limits.memory` (8 GiB in this handbook's base manifests) and the storage class. Docker has
+    no memory limit by default, which is why the same model "just works" there.
+
+    Procedure, measurements and the cgroup accounting — which is more interesting than it
+    sounds, because `mmap` makes the cost accrue per request rather than at load — are in
+    [`kubernetes/large-models/`](https://github.com/wrkode/local-ai-stack-handbook/tree/main/kubernetes/large-models).
 
 ## Failure modes
 

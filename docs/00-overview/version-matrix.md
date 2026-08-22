@@ -410,6 +410,16 @@ tested:
 | 125 | `enable_planning` on a 4B model with RAG context | k0s, GPU | **fails the request** | `failed to execute planning: failed to execute plan: no subtasks found in plan`; two consecutive turns |
 | 126 | Plain RAG after disabling 10 advanced flags | k0s, GPU | **pass — 4.9 s** | same agent that had failed three different ways answered correctly twice in a row, quoting two facts from a sentinel document. Retrieval confirmed in the log |
 | 127 | `long_term_memory` write-back target | k0s, GPU | **the agent's own retrieval collection** | conversation files land beside your documents, compete for `kb_results` slots and change the count `kb_results` must stay under |
+| 128 | Qwen3-Next-80B-A3B Q4_K_M with `tensor_buft_overrides:exps=CPU` **in Kubernetes** | k0s, GPU | **pass** | **3168 MiB VRAM** of 24576 (14% of the card), **25.0 tok/s** at 600 completion tokens, 100 s cold first request |
+| 129 | Base `limits.memory: 8Gi` against a 45 GiB model | k0s, GPU | **the Kubernetes-specific blocker** | absent under Docker, which has no limit by default; appears in no model YAML |
+| 130 | What the cgroup actually charges under `mmap: true` | k0s, GPU | **deferred and prompt-dependent** | `memory.current` **7.9 GiB** after one prompt, 8.0 after two, **8.5 after five and still climbing**; `kubectl top` showed 6.7 GiB for a 45 GiB model. Sizing the limit from observation is therefore wrong — size it from the file |
+| 131 | Longhorn for a 45 GiB model volume | k0s | **wrong store** | `numberOfReplicas: 3` → a 120 GiB claim costs 360 GiB cluster-wide, and every download write replicates twice over the network. Non-GPU nodes had 87-104 GiB free |
+| 132 | `local-path` for the model volume | k0s | **pass** | `WaitForFirstConsumer` provisions on the GPU node; claim sits `Pending` until a pod claims it, which is correct. Trade-off: the volume dies with the node |
+| 133 | 45 GiB fetch as a Job vs `/models/apply` | k0s | **Job is better** | resumable with `curl -C -`, watchable, and LocalAI keeps serving throughout; sha256 verified `83481c75…c81367` |
+| 134 | `curlimages/curl` writing to a fresh `local-path` volume | k0s | **fails** | uid 100 vs a root-owned volume: `mkdir: can't create directory ... Permission denied` before any transfer. Needs `runAsUser: 0` |
+| 135 | Two pods mounting one `ReadWriteOnce` claim | k0s | **legal on the same node** | the fetch Job and the LocalAI pod shared the claim; the `nodeSelector` is what guarantees co-location |
+| 136 | `kubectl exec pod -- sh -c 'cat > f' < local` without `-i` | k0s | **writes a 0-byte file, exits 0** | check the byte count, not the exit status |
+| 137 | A Thinking model with a small `max_tokens` | k0s, GPU | **empty `content`** | `max_tokens: 80` was consumed entirely by the reasoning block; reads as a load failure and is not one |
 
 ### A reproduced failure worth knowing
 

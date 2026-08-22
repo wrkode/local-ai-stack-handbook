@@ -1,0 +1,37 @@
+# Qwen3-Next-80B-A3B-Thinking on a single 24 GB card plus system RAM.
+#
+# Copy to the models volume as /models/qwen3next-80b-moecpu.yaml.
+#
+# gpu_layers: 999 asks for every layer on the GPU; tensor_buft_overrides then sends
+# the expert tensors back to system RAM. The combination is the point — attention and
+# the shared trunk stay on the card, while the MoE experts, which dominate the
+# parameter count and are sparsely used, live in RAM. Because A3B activates ~3B
+# parameters per token, only a small slice of that RAM is touched per token.
+#
+# Measured: 3136 MiB VRAM, ~46 GiB RSS. Dropping the override asks for 46,297 MiB of
+# VRAM and fails with cudaMalloc out of memory.
+#
+# tensor_buft_overrides is a llama.cpp option passed through opaquely. It appears
+# nowhere in LocalAI's Go source, so it is not validated — a typo is silently
+# ignored and you get an out-of-memory instead of a complaint.
+backend: llama-cpp
+name: qwen3next-80b-moecpu
+gpu_layers: 999
+threads: 6
+options:
+    - use_jinja:true
+    - tensor_buft_overrides:exps=CPU
+function:
+    grammar:
+        disable: true
+known_usecases:
+    - chat
+parameters:
+    context_size: 8192
+    # mmap keeps the weights as file-backed pages. Under a cgroup limit this is what
+    # you want: the pages count toward the limit but are reclaimable, so the kernel
+    # can drop clean pages rather than the container being OOM-killed.
+    mmap: true
+    model: llama-cpp/models/Qwen_Qwen3-Next-80B-A3B-Thinking-Q4_K_M.gguf
+template:
+    use_tokenizer_template: true

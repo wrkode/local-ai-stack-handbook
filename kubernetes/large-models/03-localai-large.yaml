@@ -1,0 +1,50 @@
+# Patch LocalAI to serve a large MoE model with GPU + system-RAM offload.
+#
+#   kubectl -n localai-stack patch deployment localai \
+#     --patch-file 03-localai-large.yaml
+#
+# PATCH, not apply — this is a partial Deployment.
+#
+# THE ONE THAT ACTUALLY MATTERS
+#
+# The base manifest sets limits.memory: 8Gi. An 80B MoE with its expert tensors on
+# the CPU needs roughly 46 GiB resident, so the container is OOM-killed long before
+# the model finishes loading. There is no useful error: the process disappears and
+# the pod restarts, which reads as a crash-loop rather than as a limit.
+#
+# This is the whole difference between the Docker run and the Kubernetes run. Docker
+# without --memory has no limit at all, so the same model "just worked" there. The
+# cgroup is not a LocalAI setting and does not appear in any model YAML.
+spec:
+  template:
+    spec:
+      containers:
+        - name: localai
+          resources:
+            requests:
+              # Requests drive scheduling and eviction order. A model that genuinely
+              # keeps ~46 GiB resident should say so, or the kubelet will treat it as
+              # a small pod that has overrun and evict it first under node pressure.
+              memory: "48Gi"
+              # threads: 6 in the model YAML — reserve them.
+              cpu: "6"
+            limits:
+              # Headroom over ~46 GiB for the KV cache and concurrent requests.
+              # mmap: true means most of the model is file-backed page cache, which
+              # counts toward this limit but is reclaimable — the kernel can drop
+              # clean pages instead of OOM-killing. Without mmap, raise this.
+              memory: "64Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - { name: models, mountPath: /models }
+            - { name: backends, mountPath: /backends }
+            - { name: data, mountPath: /data }
+      volumes:
+        # Swap /models from replicated storage to the node-local volume. See
+        # 01-models-local-path.yaml for why.
+        - name: models
+          persistentVolumeClaim: { claimName: localai-models-large }
+        - name: backends
+          persistentVolumeClaim: { claimName: localai-backends }
+        - name: data
+          persistentVolumeClaim: { claimName: localai-data }

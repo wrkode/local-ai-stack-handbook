@@ -1,0 +1,31 @@
+# A large-model volume on node-local disk instead of replicated storage.
+#
+# WHY NOT THE DEFAULT STORAGE CLASS
+#
+# The base manifests put /models on Longhorn, which is right for a 20 GiB volume
+# holding a few small models. It is wrong for a 46 GiB MoE model:
+#
+#   numberOfReplicas: 3  ->  a 80 GiB claim consumes 240 GiB cluster-wide, and
+#                            every write during the download replicates twice
+#                            over the network.
+#
+# Model files are a re-downloadable cache. Replicating them buys nothing, and the
+# pod is pinned to the single GPU node anyway, so the volume can never migrate.
+#
+# local-path uses volumeBindingMode: WaitForFirstConsumer, so the volume is
+# created on whichever node the pod is scheduled to — the GPU node.
+#
+# THE TRADE-OFF, STATED PLAINLY: this volume dies with the node. That is the
+# correct choice for a cache and the wrong choice for anything you cannot
+# re-download. Do not put agent state or collections here.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localai-models-large
+  namespace: localai-stack
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  # Qwen3-Next-80B-A3B at Q4_K_M is ~46 GiB. Headroom for a second large model
+  # and for the partial file during download.
+  resources: { requests: { storage: 120Gi } }
