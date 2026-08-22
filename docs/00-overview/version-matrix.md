@@ -400,7 +400,7 @@ tested:
 | 115 | `DELETE /api/agents/collections?name=X` | k0s | **silent no-op — but it is the wrong route** | returns `200 {"status":"ok"}` and changes nothing. Deletion *is* implemented elsewhere: see row 123 |
 | 116 | How an agent binds to a collection | k0s, GPU | **agent name, lowercased** | two canaries: agent `AutoResearchAgent` retrieved from collection `autoresearchagent`, not from `AutoResearchAgent`. Both exist as separate dirs under `/data/assets/` |
 | 117 | Pointing an agent at an arbitrary collection | k0s | **not possible** | no collection field in the 57-field config; the WebUI agent form contains no collection control at all |
-| 118 | `kb_results` default vs a small collection | k0s, GPU | **retrieval silently dead** | a real agent had `kb_results: 10` against 1-2 documents → `nResults` error → every answer a confident denial. Set to 1, retrieval worked on the next request |
+| 118 | `kb_results` default vs a small collection | k0s, GPU | **retrieval silently dead** | a real agent had `kb_results: 10` against a collection whose chunk count was lower → `nResults` error → every answer a confident denial. Reduced, retrieval worked on the next request. **The unit is chunks — see row 143** |
 | 119 | `can_stop_itself: true` | k0s, GPU | **answers become 500s** | `{"error":{"message":"interrupted via ToolCallCallback","type":"server_error"}}`; `false` answered the identical prompt |
 | 120 | `long_term_memory` + `summary_long_term_memory` past context | k0s, GPU | **SIGSEGV — whole process dies** | summarization fails with `14899 tokens exceeds the available context size (8192)`, then nil-pointer panic in `saveCurrentConversation`, `knowledgebase.go:147`. Exit 2, pod restart, all models unloaded. Reached after **4** messages on a 4B model |
 | 121 | State survival across that crash | k0s | **pass — because of the PVC** | 3 agents and 6 collections intact after the restart; without the `localai-data` PVC all of it would have been lost |
@@ -425,6 +425,9 @@ tested:
 | 140 | Same request straight to the pod | k0s | **200** | LocalAI decodes `%2F` correctly and logs the decoded path; the literal-slash form also works through Traefik |
 | 141 | Is it a permissions problem? | k0s | **no** | LocalAI runs as `uid=0(root)`; `/data/assets` and the files beneath are `root:root` and mode-readable |
 | 142 | Can a Traefik `Middleware` fix it? | k0s, Traefik | **no** | path parsing precedes middleware, so the 400 is returned before any route middleware runs |
+| 143 | What `nResults` actually counts | k0s | **chunks, not files** | a collection with **one** file that chunked into 11 accepted `max_results` up to 11 and failed at 12. The error says "documents", meaning chromem documents. `/entries` count is a lower bound only |
+| 144 | `LoadBalancer` Service bypassing Traefik | k0s, MetalLB | **pass — fixes the 400** | identical `%2F` request: 200 via the LoadBalancer, 400 via the Ingress. Full surface reachable; no shared Traefik config touched |
+| 145 | Retrieval depth after correcting `kb_results` | k0s, GPU | **qualitative jump** | at `kb_results: 1` the agent named the file it could not summarise; at 4 it answered with the document's actual content in 28 s |
 
 ### A reproduced failure worth knowing
 

@@ -1,0 +1,64 @@
+# A LoadBalancer Service for LocalAI, bypassing the ingress controller.
+#
+# WHY THIS EXISTS
+#
+# Traefik returns 400 for any request path containing %2F. Both LocalAI's and
+# LocalRecall's web UIs identify a stored document by a <uuid>/<filename> key and
+# encode it with encodeURIComponent, so viewing a document through an Ingress fails
+# with "Failed to load entry content: HTTP 400".
+#
+# The alternative fix is --entryPoints.<name>.http.sanitizePath=false, which Traefik
+# documents as "not safe" and which, on a shared entrypoint, applies to every service
+# behind it. Bypassing one proxy for one service is a smaller change than removing
+# path normalisation for everything.
+#
+# A Middleware cannot fix the Ingress path: path parsing precedes middleware.
+#
+# ---------------------------------------------------------------------------
+# WHAT YOU GIVE UP
+#
+# This is a direct L2 route to the pod. Nothing in front of it:
+#
+#   - no basic-auth middleware — that is a Traefik construct and does not apply here
+#   - no TLS termination
+#   - no access log beyond LocalAI's own
+#
+# LocalAI is unauthenticated in this handbook's default configuration, so this
+# address grants model install and delete, and — with the agent pool enabled — agent
+# creation, which is remote code execution if shell-command is available.
+#
+# Acceptable on an isolated lab network. If you need this reachable more widely, set
+# LOCALAI_API_KEY (and accept the probe consequences documented in kubernetes.md)
+# rather than relying on the ingress you have just bypassed.
+#
+# ---------------------------------------------------------------------------
+# The Ingress in 07-ingress.yaml can stay. Two Services can front one Deployment;
+# use the Ingress for API traffic and this address for the web UI.
+#
+# No IP is pinned — the pool assigns one, and pinning would embed a site-specific
+# address in a shared manifest. To pin, add:
+#
+#   metadata:
+#     annotations:
+#       metallb.io/loadBalancerIPs: "<address from your pool>"
+#
+# Read the assigned address with:
+#
+#   kubectl -n localai-stack get svc localai-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+apiVersion: v1
+kind: Service
+metadata:
+  name: localai-lb
+  namespace: localai-stack
+spec:
+  type: LoadBalancer
+  # Cluster is correct here: a single-replica Deployment means Local would only
+  # remove a hop, and Local silently blackholes traffic on nodes with no endpoint.
+  externalTrafficPolicy: Cluster
+  selector:
+    app: localai
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

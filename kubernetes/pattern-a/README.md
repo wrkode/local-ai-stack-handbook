@@ -294,7 +294,28 @@ answer degrades to naming the file it could not read. Ingest
 
 ## The failure you will actually hit
 
-`kb_results` **must not exceed the number of documents in the collection.**
+`kb_results` **must not exceed the number of CHUNKS in the collection** — not the
+number of files. The error message says "documents", which is what makes this
+expensive to get right: it means chromem documents, and one uploaded file becomes many
+of them.
+
+Measured on a collection holding exactly **one** file that chunked into 11:
+
+```text
+max_results=1   ok        max_results=11  ok
+max_results=4   ok        max_results=12  nResults must be <= ...
+```
+
+So `/entries` count is a **lower bound only**, and sizing `kb_results` from it throws
+away most of your retrieval depth — a one-file collection there supported 11.
+
+Get the real ceiling from `chunk_count` on the entry-content response:
+
+```bash
+curl -s "$L/api/agents/collections/<c>/entries/<uuid>/<file>" | head -c 40
+# {"chunk_count":11,"content":"# vquasar documentation\n...
+```
+
 `chromem` returns a hard error rather than clamping:
 
 ```text
@@ -309,17 +330,18 @@ collection is the worst case: zero documents, so *any* `kb_results` errors and
 every answer is a plausible denial.
 
 Worse, this makes `kb_results` a setting you must revisit whenever the collection
-shrinks. Removing documents, or re-ingesting a source as one file where it used to be
-three, silently pushes the count below `kb_results` and kills retrieval for an agent
-that was working yesterday. Observed exactly that: a collection went from 3
-documents to 1 while the agent still asked for 3.
+shrinks — and because the unit is chunks, re-ingesting the *same* source can move the
+ceiling in either direction. Ingesting a rendered HTML page instead of raw markdown
+changes the chunk count, and so does editing the document. Observed a collection go
+from 3 files to 1 while an agent still asked for 3.
 
-If an agent will not answer from its knowledge, check the document count before
-anything else:
+The practical effect of getting it wrong in the safe direction is quiet and costly:
+retrieval works, so nothing looks broken, but the agent sees one chunk of an
+eleven-chunk document and answers vaguely. That is indistinguishable from a model
+being weak.
 
-```bash
-curl -s "$L/api/agents/collections/<name>/entries"
-```
+If an agent will not answer from its knowledge, or answers thinly, find the chunk
+ceiling by bisecting `max_results` against `/search` and set `kb_results` below it.
 
 The same error surfaces directly from the search endpoint, which is the quickest
 way to confirm it:
