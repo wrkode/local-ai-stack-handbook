@@ -453,6 +453,53 @@ failed.
 Order the three timeouts: **client > ingress > `LOCALAGI_TIMEOUT`** (which is per model
 call, default `5m`).
 
+### The ingress breaks the collection viewer
+
+Publishing the stack introduced a regression that port-forwarding never showed, and it
+is worth understanding because the symptom names the wrong layer.
+
+Both web UIs identify a stored document by a key shaped `<uuid>/<filename>`, and both
+encode it with `encodeURIComponent` before putting it in the path — so the `/` becomes
+`%2F`. **Traefik rejects any path containing `%2F` with a 400 before forwarding it.**
+
+```text
+GET .../entries/26eabe8d-...%2FREADME.txt   through Traefik  ->  400
+GET .../entries/26eabe8d-...%2FREADME.txt   direct to pod    ->  200
+GET .../entries/26eabe8d-.../README.txt     through Traefik  ->  200
+GET /readyz%2Ffoo                           through Traefik  ->  400
+```
+
+The last line is the useful one: a path that does not exist also returns 400, so this is
+a blanket rejection of encoded slashes rather than anything about collections. In the UI
+it surfaces as:
+
+```text
+Failed to load entry content: HTTP 400
+```
+
+which reads like a permissions or storage problem. It is neither — LocalAI runs as root,
+the files are `root:root` and readable, and the same request succeeds against the pod.
+
+Traefik's entrypoints sanitize request paths by default. The option that changes it is
+documented with an explicit warning:
+
+> `--entryPoints.<name>.http.sanitizePath=false`
+> "Setting the sanitizePath option to false is not safe."
+
+| Fix | Blast radius |
+|---|---|
+| Port-forward for browsing documents | none — but not a fix |
+| A `LoadBalancer`/`NodePort` Service bypassing the ingress | that service only; no shared config touched |
+| A dedicated entrypoint with `sanitizePath=false`, referenced by one Ingress | that entrypoint only; needs edits to the controller |
+| `sanitizePath=false` on the shared entrypoint | **every service behind it** |
+
+Prefer bypassing the proxy over weakening it. And note the ordering trap: the service
+whose UI needs `%2F` here is an unauthenticated model server, which is the worst place to
+disable path normalisation. Put authentication in front before considering it.
+
+A middleware cannot help. Path parsing happens before middleware runs, so the request is
+rejected before any `Middleware` on the route is consulted.
+
 ### Validated through the ingress
 
 All three services were published and exercised without any port-forward:

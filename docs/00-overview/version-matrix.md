@@ -420,6 +420,11 @@ tested:
 | 135 | Two pods mounting one `ReadWriteOnce` claim | k0s | **legal on the same node** | the fetch Job and the LocalAI pod shared the claim; the `nodeSelector` is what guarantees co-location |
 | 136 | `kubectl exec pod -- sh -c 'cat > f' < local` without `-i` | k0s | **writes a 0-byte file, exits 0** | check the byte count, not the exit status |
 | 137 | A Thinking model with a small `max_tokens` | k0s, GPU | **empty `content`** | `max_tokens: 80` was consumed entirely by the reasoning block; reads as a load failure and is not one |
+| 138 | Viewing a stored document through the ingress | k0s, Traefik | **400 — a regression from publishing** | both UIs `encodeURIComponent` a `<uuid>/<filename>` key, so the `/` becomes `%2F`; Traefik rejects it. Surfaces as `Failed to load entry content: HTTP 400` |
+| 139 | Is the `%2F` rejection specific to collections? | k0s, Traefik | **no — blanket** | `/readyz%2Ffoo` also returns 400, so any encoded slash on any route fails |
+| 140 | Same request straight to the pod | k0s | **200** | LocalAI decodes `%2F` correctly and logs the decoded path; the literal-slash form also works through Traefik |
+| 141 | Is it a permissions problem? | k0s | **no** | LocalAI runs as `uid=0(root)`; `/data/assets` and the files beneath are `root:root` and mode-readable |
+| 142 | Can a Traefik `Middleware` fix it? | k0s, Traefik | **no** | path parsing precedes middleware, so the 400 is returned before any route middleware runs |
 
 ### A reproduced failure worth knowing
 

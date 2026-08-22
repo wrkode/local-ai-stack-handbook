@@ -28,6 +28,19 @@
 #                grant. If shell-command is available, creating an agent is
 #                remote code execution
 #
+# KNOWN REGRESSION FROM PUBLISHING THIS
+#
+# Traefik rejects any request path containing %2F with a 400. Both web UIs encode
+# a document key of the form <uuid>/<filename> with encodeURIComponent, so viewing
+# a stored document through this Ingress fails with:
+#
+#   Failed to load entry content: HTTP 400
+#
+# The same request succeeds against the pod directly. It is not permissions and not
+# storage. A Middleware cannot fix it — path parsing happens first. See
+# docs/06-deployment/kubernetes.md for the four options and their blast radius.
+#
+# ---------------------------------------------------------------------------
 # Acceptable on an isolated lab network. Not acceptable anywhere else without
 # authentication in front — see the basic-auth middleware at the bottom of this
 # file, and docs/06-deployment/security.md.
