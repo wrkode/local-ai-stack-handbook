@@ -73,6 +73,8 @@ Recorded here because they were established by probing a running v4.8.2.
 | `GET` | `/api/agents/{name}/config` | the full 57-field config |
 | `GET` | `/api/agents/collections` | list |
 | `POST` | `/api/agents/collections` | create — `{"name":"..."}` |
+| `POST` | `/api/agents/import` | import a config — **201**; empty body gives 400 |
+| `GET` | `/api/agents/{name}/export` | the config, as import expects it |
 | `DELETE` | `/api/agents/collections?name=X` | **query parameter, not a path segment** |
 | `POST` | `/api/agents/collections/{c}/upload` | multipart `file=@...` |
 | `GET` | `/api/agents/collections/{c}/entries` | `GET` only — `POST` here is 404 |
@@ -157,6 +159,84 @@ way to confirm it:
 ```text
 {"error":"nResults must be <= the number of documents in the collection"}
 ```
+
+## Importing an agent
+
+`POST /api/agents/import` with an exported config body. Verified: **201**.
+
+```bash
+curl -s "$L/api/agents/<name>/export" -o agent.json
+# edit "name" in agent.json first — see below
+curl -s -X POST "$L/api/agents/import" \
+  -H 'Content-Type: application/json' --data-binary @agent.json
+```
+
+The body is the same 57-field object `GET /api/agents/{name}/export` produces. An
+empty body returns `400`, which is the quickest way to confirm the route exists.
+
+**Change `name` before importing.** The exported file carries the source agent's
+name, so importing it unedited recreates the same name rather than a copy.
+
+**Import does not bring knowledge with it.** Collections bind to agents *by name*,
+and the config contains no collection reference. An agent imported under a new name
+gets a freshly auto-created, **empty** collection — and then hits the `kb_results`
+error above and denies all knowledge:
+
+```text
+INFO Error finding similar strings inside KB: error=nResults must be <= the number
+     of documents in the collection
+INFO [Knowledge Base Lookup] No similar strings found in KB agent="imported-probe"
+```
+
+Observed exactly that on a fresh import. Re-upload the documents under the new
+agent's name to fix it.
+
+### Where the button is in the UI
+
+On `/app/agents`, in the page header, next to **Create Agent**. Two reasons it is
+easy to miss:
+
+It is a `<label class="btn btn-secondary">` wrapping a hidden
+`<input type="file" accept=".json">` — not a `<button>`. It is styled as a
+secondary (grey) control beside the primary blue one, and carries only the
+`fa-file-import` icon plus the `actions.import` label.
+
+It is **not** feature-gated — no flag hides it. The only conditional control in that
+header is the **Agent Hub** link, which renders solely when the agent hub URL is set.
+So a missing import control means a stale page, not a disabled feature; reload after
+enabling the pool.
+
+There is also a second copy inside the zero-agents empty state, and there the CSS
+class is misplaced — `agents-import-input` sits on the `<input>` rather than the
+`<label>`, while the rule is:
+
+```css
+.agents-import-input input[type=file] { display: none }
+```
+
+The selector needs the class on an *ancestor*, so in the empty state it does not
+match and the raw native file picker renders instead of a styled button. With zero
+agents, what you see does not look like an import button at all.
+
+Import mode cannot be deep-linked. `/app/agents/new` shows "Create Agent"; the
+"Import Agent" title appears only when router navigation state carries
+`importedConfig`, which is set by that file input's `onChange`. There is no URL for it.
+
+## Deleting a collection reports success and does nothing
+
+```text
+DELETE /api/agents/collections?name=pattern-a-probe  ->  200 {"status":"ok"}
+GET    /api/agents/collections                       ->  still listed
+GET    /api/agents/collections/pattern-a-probe/entries -> {"count":1,...}
+POST   .../search                                    ->  returns the content
+```
+
+Repeated twice, with the document still retrievable afterwards. Agent deletion
+(`DELETE /api/agents/{name}`) does work; **collection deletion is a silent no-op.**
+
+Treat this as a data-retention problem, not a tidiness one: if you delete a
+collection because it holds sensitive or poisoned content, it is still there and
+still searchable, and the API told you it was gone.
 
 ## The field that does nothing
 

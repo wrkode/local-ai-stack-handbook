@@ -392,6 +392,12 @@ tested:
 | 107 | `kb_results` > document count on `chromem` | k0s | **hard error, logged at INFO** | `nResults must be <= the number of documents in the collection` → `No similar strings found in KB` → a confident "I do not know" with nothing at ERROR |
 | 108 | `/data` unmounted in the base manifest | k0s | **defect found and fixed** | `--data-path` holds `collectiondb`, agent state, tasks, jobs; it was the container's writable layer, so ingestion was discarded on every rollout |
 | 109 | Strategic-merge patch over a `configMapKeyRef` | k0s | **rejected without an explicit null** | `env[0].valueFrom: Invalid value: "": may not be specified when 'value' is not empty`; `valueFrom: null` in the same patch fixes it |
+| 110 | `POST /api/agents/import` | k0s | **pass — 201** | body is the `GET /api/agents/{name}/export` object; empty body returns 400, which proves the route exists |
+| 111 | Imported agent's knowledge | k0s, GPU | **empty — by design, and it looks broken** | collections bind by agent **name**, so an import under a new name auto-creates an empty collection and then denies all knowledge via the `nResults` path |
+| 112 | Import control in the WebUI | k0s | **present, not feature-gated** | a `<label class="btn btn-secondary">` wrapping a hidden `<input type=file>` on `/app/agents`; only the Agent Hub link is conditional |
+| 113 | Import control in the zero-agents empty state | k0s | **UI defect** | `agents-import-input` is on the `<input>`, but the rule is `.agents-import-input input[type=file]{display:none}` — needs the class on an ancestor, so the raw native file picker renders |
+| 114 | Deep-linking to import mode | k0s | **not possible** | "Import Agent" is gated on router state `importedConfig`; `/app/agents/new` shows "Create Agent" |
+| 115 | `DELETE /api/agents/collections?name=X` | k0s | **silent no-op** | returns `200 {"status":"ok"}`; collection stays listed, keeps its entries and still returns them from `/search`. Agent deletion does work |
 
 ### A reproduced failure worth knowing
 
