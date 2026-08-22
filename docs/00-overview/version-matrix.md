@@ -397,7 +397,7 @@ tested:
 | 112 | Import control in the WebUI | k0s | **present, not feature-gated** | a `<label class="btn btn-secondary">` wrapping a hidden `<input type=file>` on `/app/agents`; only the Agent Hub link is conditional |
 | 113 | Import control in the zero-agents empty state | k0s | **UI defect** | `agents-import-input` is on the `<input>`, but the rule is `.agents-import-input input[type=file]{display:none}` — needs the class on an ancestor, so the raw native file picker renders |
 | 114 | Deep-linking to import mode | k0s | **not possible** | "Import Agent" is gated on router state `importedConfig`; `/app/agents/new` shows "Create Agent" |
-| 115 | `DELETE /api/agents/collections?name=X` | k0s | **silent no-op** | returns `200 {"status":"ok"}`; collection stays listed, keeps its entries and still returns them from `/search`. Agent deletion does work |
+| 115 | `DELETE /api/agents/collections?name=X` | k0s | **silent no-op — but it is the wrong route** | returns `200 {"status":"ok"}` and changes nothing. Deletion *is* implemented elsewhere: see row 123 |
 | 116 | How an agent binds to a collection | k0s, GPU | **agent name, lowercased** | two canaries: agent `AutoResearchAgent` retrieved from collection `autoresearchagent`, not from `AutoResearchAgent`. Both exist as separate dirs under `/data/assets/` |
 | 117 | Pointing an agent at an arbitrary collection | k0s | **not possible** | no collection field in the 57-field config; the WebUI agent form contains no collection control at all |
 | 118 | `kb_results` default vs a small collection | k0s, GPU | **retrieval silently dead** | a real agent had `kb_results: 10` against 1-2 documents → `nResults` error → every answer a confident denial. Set to 1, retrieval worked on the next request |
@@ -405,6 +405,9 @@ tested:
 | 120 | `long_term_memory` + `summary_long_term_memory` past context | k0s, GPU | **SIGSEGV — whole process dies** | summarization fails with `14899 tokens exceeds the available context size (8192)`, then nil-pointer panic in `saveCurrentConversation`, `knowledgebase.go:147`. Exit 2, pod restart, all models unloaded. Reached after **4** messages on a 4B model |
 | 121 | State survival across that crash | k0s | **pass — because of the PVC** | 3 agents and 6 collections intact after the restart; without the `localai-data` PVC all of it would have been lost |
 | 122 | Ingesting GitHub `blob` URLs | k0s | **stores page chrome, not the doc** | chunks were `Breadcrumbs`, `Copy raw file`, `Blame`; at `MAX_CHUNKING_SIZE=400` boilerplate fills whole chunks. Use `raw.githubusercontent.com` |
+| 123 | `DELETE /api/agents/collections/{c}/entry/delete` | k0s | **pass — this is the working delete** | body `{"entry":"<uuid>/<file>"}`; returns `{"count":N,"remaining_entries":[...]}`. Also present: `POST .../reset` and `POST .../sources`. None are in swagger; found in the WebUI's API bundle |
+| 124 | `summary_long_term_memory: false` as the crash mitigation | k0s, GPU | **pass** | identical `Saving conversation ... conversation size=4` step, **no summarization request and no panic**. Removes the code path rather than postponing it |
+| 125 | `enable_planning` on a 4B model with RAG context | k0s, GPU | **fails the request** | `failed to execute planning: failed to execute plan: no subtasks found in plan`; two consecutive turns |
 
 ### A reproduced failure worth knowing
 

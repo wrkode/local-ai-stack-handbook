@@ -75,7 +75,10 @@ Recorded here because they were established by probing a running v4.8.2.
 | `POST` | `/api/agents/collections` | create — `{"name":"..."}` |
 | `POST` | `/api/agents/import` | import a config — **201**; empty body gives 400 |
 | `GET` | `/api/agents/{name}/export` | the config, as import expects it |
-| `DELETE` | `/api/agents/collections?name=X` | **query parameter, not a path segment** |
+| `DELETE` | `/api/agents/collections?name=X` | **200 but a no-op — do not use** |
+| `DELETE` | `/api/agents/collections/{c}/entry/delete` | body `{"entry":"<uuid>/<file>"}` — this is the one that works |
+| `POST` | `/api/agents/collections/{c}/reset` | empty a collection |
+| `POST` | `/api/agents/collections/{c}/sources` | ingest from a URL |
 | `POST` | `/api/agents/collections/{c}/upload` | multipart `file=@...` |
 | `GET` | `/api/agents/collections/{c}/entries` | `GET` only — `POST` here is 404 |
 | `POST` | `/api/agents/collections/{c}/search` | `{"query":"...","max_results":N}` |
@@ -255,6 +258,12 @@ and the model answers "I do not know" with complete confidence. An empty
 collection is the worst case: zero documents, so *any* `kb_results` errors and
 every answer is a plausible denial.
 
+Worse, this makes `kb_results` a setting you must revisit whenever the collection
+shrinks. Removing documents, or re-ingesting a source as one file where it used to be
+three, silently pushes the count below `kb_results` and kills retrieval for an agent
+that was working yesterday. Observed exactly that: a collection went from 3
+documents to 1 while the agent still asked for 3.
+
 If an agent will not answer from its knowledge, check the document count before
 anything else:
 
@@ -331,21 +340,39 @@ Import mode cannot be deep-linked. `/app/agents/new` shows "Create Agent"; the
 "Import Agent" title appears only when router navigation state carries
 `importedConfig`, which is set by that file input's `onChange`. There is no URL for it.
 
-## Deleting a collection reports success and does nothing
+## Deleting: the obvious route is the broken one
 
 ```text
-DELETE /api/agents/collections?name=pattern-a-probe  ->  200 {"status":"ok"}
-GET    /api/agents/collections                       ->  still listed
-GET    /api/agents/collections/pattern-a-probe/entries -> {"count":1,...}
-POST   .../search                                    ->  returns the content
+DELETE /api/agents/collections?name=X          ->  200 {"status":"ok"}, does NOTHING
+GET    /api/agents/collections                 ->  still listed
+GET    /api/agents/collections/X/entries       ->  {"count":1,...}
+POST   .../search                              ->  still returns the content
 ```
 
-Repeated twice, with the document still retrievable afterwards. Agent deletion
-(`DELETE /api/agents/{name}`) does work; **collection deletion is a silent no-op.**
+Repeated twice, content still retrievable afterwards. But this is **not** because
+deletion is unimplemented — it is because that is the wrong route. The WebUI uses
+two others, neither guessable and neither in swagger:
 
-Treat this as a data-retention problem, not a tidiness one: if you delete a
-collection because it holds sensitive or poisoned content, it is still there and
-still searchable, and the API told you it was gone.
+| Purpose | Call |
+|---|---|
+| Remove one document | `DELETE /api/agents/collections/{c}/entry/delete` with `{"entry":"<key>"}` |
+| Empty a collection | `POST /api/agents/collections/{c}/reset` |
+| Ingest from a URL | `POST /api/agents/collections/{c}/sources` |
+
+`entry/delete` works and is verified — it returns the surviving list, which is how
+you confirm it took:
+
+```json
+{"count":1,"remaining_entries":["f220c841-.../README.md"]}
+```
+
+The `entry` value is the full key from `/entries`, `<uuid>/<filename>`, not the
+bare filename.
+
+So the retention risk is narrower than it first looks, but the trap is worse: the
+route a reader would try first reports success and leaves the data in place. If you
+delete a collection because it held sensitive or poisoned content, verify with
+`/entries` afterwards rather than trusting the `200`.
 
 ## The field that does nothing
 
