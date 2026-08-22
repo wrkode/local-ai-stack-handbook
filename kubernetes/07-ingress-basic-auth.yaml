@@ -1,0 +1,41 @@
+# OPT-IN: username/password in front of the ingresses in 07-ingress.yaml.
+#
+# These services are unauthenticated by design (see 02-secrets.yaml for why
+# enabling their own API keys breaks every probe). Putting HTTP basic auth at the
+# ingress is the least invasive way to stop casual access without touching the
+# probes at all.
+#
+# 1. Generate the credential. htpasswd format, bcrypt:
+#
+#      htpasswd -nbB admin 'a-real-password' > /tmp/auth
+#      kubectl -n localai-stack create secret generic localai-basic-auth \
+#        --from-file=users=/tmp/auth
+#      rm /tmp/auth
+#
+#    Do NOT commit the generated secret. This file deliberately contains no
+#    credential — a password in git is not a password.
+#
+# 2. Apply this file:
+#
+#      kubectl apply -f 07-ingress-basic-auth.yaml
+#
+# 3. Uncomment the router.middlewares annotation on each Ingress in
+#    07-ingress.yaml and re-apply. The reference is namespaced and
+#    provider-suffixed:
+#
+#      traefik.ingress.kubernetes.io/router.middlewares: localai-stack-basic-auth@kubernetescrd
+#
+#    That is <namespace>-<middleware-name>@kubernetescrd. Getting the suffix
+#    wrong makes Traefik silently ignore the middleware, which looks exactly like
+#    working authentication until someone tries without a password.
+#
+# This protects the ingress only. Anything already inside the cluster still
+# reaches the Services directly — use a NetworkPolicy for that.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: basic-auth
+  namespace: localai-stack
+spec:
+  basicAuth:
+    secret: localai-basic-auth

@@ -1,24 +1,73 @@
-# Only LocalAGI is exposed. LocalAI, LocalRecall and PostgreSQL stay internal:
-# publishing LocalRecall grants unauthenticated READ AND WRITE access to your
-# collections, including the ability to poison an agent's memory.
+# Ingress for the stack, via Traefik.
+#
+# Each service gets TWO hostnames so this works before you touch DNS:
+#
+#   <svc>.lab.k8                        your convention — needs a DNS record
+#   <svc>.<traefik-ip>.sslip.io         public wildcard DNS — works immediately
+#
+# sslip.io resolves *.<ip>.sslip.io to that IP with no configuration. Replace the
+# IP if your Traefik LoadBalancer address differs:
+#
+#   kubectl get svc -A | grep traefik
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE APPLYING
+#
+# These three services are UNAUTHENTICATED by default. Publishing them grants
+# anyone who can reach the ingress:
+#
+#   LocalAI      install and delete models; the built-in Assistant, whose
+#                in-process MCP server reports 36 tools with read_only=false
+#   LocalRecall  read AND write every collection, including agents' memories —
+#                i.e. knowledge-base poisoning
+#   LocalAGI     create agents, and an agent's `actions` list is a permission
+#                grant. If shell-command is available, creating an agent is
+#                remote code execution
+#
+# Acceptable on an isolated lab network. Not acceptable anywhere else without
+# authentication in front — see the basic-auth middleware at the bottom of this
+# file, and docs/06-deployment/security.md.
+#
+# The narrow choice is to expose ONLY localagi and keep the other two internal.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: localai
+  namespace: localai-stack
+  annotations:
+    # Uncomment to require a username and password (see the Secret below).
+    # traefik.ingress.kubernetes.io/router.middlewares: localai-stack-basic-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: localai.lab.k8
+      http: &localai_backend
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: localai
+                port:
+                  number: 8080
+    - host: localai.172.16.56.153.sslip.io
+      http: *localai_backend
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: localagi
   namespace: localai-stack
   annotations:
-    # The default 60s is SHORTER than a real agent request. Measured on CPU:
-    # 38.7 s for one tool call across three model calls. When the default fires,
-    # the client gets a 504 while the agent runs to completion and COMMITS its
-    # tool side effects.
-    #
-    # Order the three timeouts: client > ingress > LOCALAGI_TIMEOUT (per call).
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # traefik.ingress.kubernetes.io/router.middlewares: localai-stack-basic-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
+  ingressClassName: traefik
   rules:
-    - host: agents.example.com
-      http:
+    - host: localagi.lab.k8
+      http: &localagi_backend
         paths:
           - path: /
             pathType: Prefix
@@ -26,4 +75,35 @@ spec:
               service:
                 name: localagi
                 port:
+                  # LocalAGI listens on 3000 inside the container — hardcoded.
                   number: 3000
+    - host: localagi.172.16.56.153.sslip.io
+      http: *localagi_backend
+---
+# LocalRecall: the one you should think hardest about publishing. It is
+# unauthenticated read/write on your knowledge, and it has no health endpoint,
+# no metrics and no UI worth using. Exposed here only because it is useful to
+# probe retrieval directly while learning.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: localrecall
+  namespace: localai-stack
+  annotations:
+    # traefik.ingress.kubernetes.io/router.middlewares: localai-stack-basic-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: localrecall.lab.k8
+      http: &localrecall_backend
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: localrecall
+                port:
+                  number: 8080
+    - host: localrecall.172.16.56.153.sslip.io
+      http: *localrecall_backend

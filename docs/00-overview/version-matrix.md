@@ -368,6 +368,17 @@ tested:
 | 83 | Cross-model delegation | k0s, GPU | **pass** | log confirmed `agent=router model=qwen3-1.7b` → `agent=deep-thinker model=qwen3-4b`; **37.5 s cold, 7.8 s warm** |
 | 84 | Whether the cross-model split improved the answer | k0s, GPU | **no difference on this test** | qwen3-1.7b answered 578,100 correctly unaided, so the routing mechanism was validated but no quality gap was demonstrated |
 | 85 | Three models resident simultaneously | k0s, GPU | **pass** | qwen3-1.7b 2202 MiB + granite 234 MiB + qwen3-4b 4850 MiB = **7294 MiB**, no eviction |
+| 86 | Shipped `07-ingress.yaml` as written | k0s, Traefik | **unusable** | host was the placeholder `agents.example.com` and every annotation was `nginx.ingress.kubernetes.io/*`; the object still reported an address |
+| 87 | Ingress via `*.<ip>.sslip.io` host | k0s, Traefik | **pass** | resolves through public DNS with no zone edit; makes an ingress testable the moment it is applied |
+| 88 | Dual-host Ingress via a YAML anchor | k0s, Traefik | **pass** | one backend definition serving both `<svc>.lab.k8` and the sslip.io host |
+| 89 | LocalAI through the ingress | k0s, Traefik | **pass** | `/readyz` 200, `/v1/models` → 3 models, `/system` → 3 backends loaded |
+| 90 | LocalAGI through the ingress | k0s, Traefik | **pass** | `/api/agents` → 6 agents; `/v1/responses` answered |
+| 91 | LocalRecall through the ingress | k0s, Traefik | **pass** | `/api/collections` → `["k8s-probe"]` |
+| 92 | `verify-stack.sh` with all URLs on the ingress | k0s, Traefik, GPU | **pass — all 7 layers** | first run with **no port-forward**; included the full ingest → embed → search round trip and a 2 s agent request |
+| 93 | Longest request achievable, through the ingress | k0s, Traefik, GPU | **36 s** | 4000-token essay, `finish_reason: stop`. 7000-token forced output was 24 s (~290 tok/s); a delegated cross-model request 18 s |
+| 94 | Whether Traefik cuts off a slow agent request | k0s, Traefik | **it does not** | `writeTimeout` — the setting that governs a slow response — defaults to **`0`, unlimited**. `readTimeout` 60 s covers reading the request only. **Documented, not tested past 36 s** |
+| 95 | `nginx.ingress.kubernetes.io/*` annotations on Traefik | k0s, Traefik | **silently ignored** | no warning, no event; an ignored annotation is indistinguishable from a working one |
+| 96 | `basicAuth` Traefik `Middleware` manifest | k0s, Traefik | **schema valid, not enabled** | `middlewares.traefik.io` CRD present, `--dry-run=client` passed; never put in front of a live route |
 
 ### A reproduced failure worth knowing
 
@@ -417,6 +428,9 @@ Recorded honestly, because the gaps matter:
 | `/v1/messages`, `/v1/rerank`, and the face/voice/vision endpoints | **not exercised** — routes confirmed present only |
 | Distributed mode (NATS + PostgreSQL) | **not executed** |
 | Pattern A with agents enabled *and* knowledge | **not executed** |
+| TLS on the ingress | **not executed** — HTTP only; no certificate issuer in the cluster |
+| The basic-auth middleware actually in front of a route | **not executed** — manifest validated, never enabled |
+| A request longer than 60 s through an ingress | **not achievable here** — the GPU answers too fast; 36 s was the maximum |
 
 Every page describing the above is **source-verified**, not tested. The
 distinction is maintained in the prose.
@@ -456,4 +470,6 @@ for the evidence rules.
 - [LocalRecall releases](https://github.com/mudler/LocalRecall/releases/tag/v0.6.4) — v0.6.4, 2026-07-19.
 - [LocalAI `gallery/qwen3.yaml`](https://github.com/mudler/LocalAI/blob/v4.8.2/gallery/qwen3.yaml) — `qwen3-1.7b` tool-calling configuration.
 - [LocalAI `core/cli/run.go`](https://github.com/mudler/LocalAI/blob/v4.8.2/core/cli/run.go) — default embedding model.
+- [Traefik responding timeouts](https://doc.traefik.io/traefik/reference/install-configuration/entrypoints/#respondingtimeouts) — `readTimeout` 60 s, `writeTimeout` 0, `idleTimeout` 180 s. Read 2026-08-22.
 - Image tags, model sizes and failure results: observed 2026-08-17.
+- Ingress results: observed 2026-08-22, Traefik v3.6.6, k0s v1.34.3.

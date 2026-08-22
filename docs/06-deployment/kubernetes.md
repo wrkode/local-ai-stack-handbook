@@ -29,6 +29,7 @@ results:
   verify_stack_all_7_layers: pass
   agent_with_knowledge_and_tool: pass — 23.7 s CPU, 2.12 s GPU
   retrieval_across_pods: pass — 55.7 ms
+  verify_stack_via_ingress: pass — all 7 layers, no port-forward (2026-08-22)
   gpu: pass — device plugin v0.19.3, cuda12-llama-cpp, 2194 MiB VRAM
   defects_found_and_fixed: 4
 ```
@@ -41,7 +42,7 @@ revealed. They are called out in place below and summarised in
 
 ```mermaid
 flowchart TB
-  ING["Ingress<br/>long read timeout"]
+  ING["Ingress<br/>see the timeout table"]
   subgraph NS["namespace"]
     AG["Deployment: localagi<br/>replicas: 1"]
     LAI["Deployment: localai<br/>replicas: 1 (GPU-bound)"]
@@ -397,12 +398,15 @@ kind: Ingress
 metadata:
   name: localagi
   annotations:
+    # ingress-nginx only — Traefik ignores these, see below
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # Traefik: entrypoint, and an optional auth middleware
+    traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
   rules:
-    - host: agents.example.com
-      http:
+    - host: localagi.example.com
+      http: &backend
         paths:
           - path: /
             pathType: Prefix
@@ -411,18 +415,32 @@ spec:
                 name: localagi
                 port:
                   number: 3000
+    # resolves to <ip> through public DNS with no zone edit — testable immediately
+    - host: localagi.192.0.2.10.sslip.io
+      http: *backend
 ```
 
-!!! warning "These annotations are ingress-nginx-specific"
-    Verified on a **Traefik** cluster: `nginx.ingress.kubernetes.io/*` annotations are simply
-    ignored, and Traefik has **no equivalent per-Ingress read-timeout annotation**. Its
-    forwarding timeouts are static configuration
-    (`--serversTransport.forwardingTimeouts.responseHeaderTimeout`) or a `ServersTransport`
-    CRD referenced by the Service — not something you set on the Ingress.
+!!! warning "These annotations are ingress-nginx-specific — and Traefik does not need them"
+    `nginx.ingress.kubernetes.io/*` annotations are silently ignored by Traefik, and Traefik has
+    **no equivalent per-Ingress read-timeout annotation**. But the conclusion is not "find the
+    Traefik equivalent" — it is that **Traefik does not cut off a slow backend by default**:
 
-    So on Traefik the timeout fix is **not in this file**. Check your controller before assuming
-    the annotation did anything; an ignored annotation looks exactly like a working one until an
-    agent request runs long.
+    | Controller | Setting governing a slow backend | Default | Action needed |
+    |---|---|---|---|
+    | ingress-nginx | `proxy-read-timeout` | **60 s** | **must raise it** |
+    | Traefik | `respondingTimeouts.writeTimeout` | **0 — unlimited** | none |
+
+    Traefik's `readTimeout` (60 s) covers reading the *request*, which is irrelevant for a small
+    JSON body, and `idleTimeout` (180 s) applies to idle keep-alive connections, not an in-flight
+    response.
+
+    Verified: a 36-second completion and a full agent request both passed through Traefik with no
+    tuning and no annotations. We could **not** construct a single request longer than ~36 s on
+    GPU hardware, so the beyond-60 s case rests on the documented default rather than on our
+    measurement.
+
+    The general rule stands: **know which controller you have before assuming an annotation did
+    anything.** An ignored annotation looks exactly like a working one.
 
 The default read timeout — 60 seconds on ingress-nginx — is **shorter than a real agent
 request**. Measured on CPU: 38.7 s for one tool call across three model calls, 24.1 s with
@@ -434,6 +452,33 @@ failed.
 
 Order the three timeouts: **client > ingress > `LOCALAGI_TIMEOUT`** (which is per model
 call, default `5m`).
+
+### Validated through the ingress
+
+All three services were published and exercised without any port-forward:
+
+```text
+localai.<traefik-ip>.sslip.io       /readyz, /v1/models, /system     200
+localagi.<traefik-ip>.sslip.io      /api/agents, /v1/responses       200
+localrecall.<traefik-ip>.sslip.io   /api/collections                 200
+```
+
+`scripts/verify-stack.sh --agent <name>` passed all seven layers against those URLs, including the
+full ingest → chunk → embed → store → search round trip and a 2 s agent request.
+
+Two practical notes from doing it:
+
+**Give each Ingress two hostnames.** The shipped `07-ingress.yaml` pairs your own domain with a
+`*.<ip>.sslip.io` host, which resolves to that IP through public wildcard DNS with no configuration
+at all. It means the ingress is testable the moment it is applied, before anyone touches a DNS
+zone. A YAML anchor keeps the backend defined once.
+
+**Publish only what you consume.** Exposing all three grants unauthenticated model management on
+LocalAI, read **and write** on LocalRecall collections — knowledge-base poisoning — and agent
+creation on LocalAGI, which is remote code execution if `shell-command` is available. The narrow
+choice is LocalAGI only. `kubernetes/07-ingress-basic-auth.yaml` adds an opt-in Traefik basic-auth
+middleware, which protects the ingress **without** touching probes — unlike enabling the services'
+own API keys, which breaks every probe. See [security](security.md).
 
 ## Resources
 
@@ -618,7 +663,7 @@ Add `LOCALRECALL_URL` and drop the flag if you also forward LocalRecall.
 | Pod killed ~30 min into first start | `failureThreshold` too low for the model download |
 | `CrashLoopBackOff` with usage text in the log | missing `LOCALAGI_MODEL` or `LOCALAGI_LLM_API_URL` |
 | Agents vanish after a rollout | agent state not on a PVC, or two replicas sharing one |
-| 504 from the ingress, work completed anyway | ingress read timeout shorter than the agent request |
+| 504 from the ingress, work completed anyway | ingress read timeout shorter than the agent request — **ingress-nginx**; Traefik does not do this by default |
 | 401 on internal hops, external surface fine | the five keys do not agree |
 | Retrieval silently stops working | LocalRecall unreachable — logs `Error finding similar strings inside KB` at INFO |
 | Collections empty after a restart | `COLLECTION_DB_PATH` defaulted into the container layer |

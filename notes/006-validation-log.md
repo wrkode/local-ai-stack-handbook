@@ -1068,6 +1068,145 @@ All nine recipes are now tested. What remains is environmental:
 | Backup and restore | documented, never executed |
 | Multiple replicas of anything | LocalAGI is a singleton by design |
 
+## Pass 8: Ingress
+
+Date: 2026-08-22. The last item on the "not validated" list that the environment could actually
+close. Everything up to here had used `kubectl port-forward`, which bypasses the ingress
+controller entirely — so nothing about routing, hostnames or proxy timeouts had ever been
+exercised.
+
+### The shipped manifest had never been usable
+
+Reading `kubernetes/07-ingress.yaml` before applying it found two things that made it a
+non-starter, and both are the kind of defect that only surfaces when you try to use the file:
+
+1. Every annotation was `nginx.ingress.kubernetes.io/*`. The cluster runs **Traefik**. Traefik
+   does not read them and does not complain about them.
+2. The host was `agents.example.com` — a placeholder. Applying the file produced a valid Ingress
+   object that could never be reached.
+
+An Ingress with a wrong host and ignored annotations reports `Ready` and shows an address. There
+is no error to find. This is the failure mode the handbook keeps returning to: **the object being
+accepted is not evidence the thing works.**
+
+### sslip.io removes the DNS prerequisite
+
+The cluster convention is `*.lab.k8` with a **per-host** record, not a wildcard —
+`grafana.lab.k8` resolved, `localai.lab.k8` did not. So testing the ingress required either
+editing a DNS zone or editing `/etc/hosts`, neither of which belongs in a handbook manifest.
+
+The fix was to give every Ingress **two** hostnames:
+
+```yaml
+  rules:
+    - host: localai.lab.k8
+      http: &localai_backend
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: localai
+                port:
+                  number: 8080
+    - host: localai.172.16.56.153.sslip.io
+      http: *localai_backend
+```
+
+`sslip.io` answers any `<anything>.<ip>.sslip.io` with that IP, so the second host works through
+public DNS with zero configuration. The YAML anchor means the backend is written once — a copy of
+the block would be a place for the two hosts to silently diverge.
+
+Verified through the ingress, no port-forward anywhere:
+
+```text
+localai.<ip>.sslip.io      /readyz        -> 200
+                           /v1/models     -> granite, qwen3-1.7b, qwen3-4b
+                           /system        -> 3 backends loaded
+localagi.<ip>.sslip.io     /api/agents    -> 6 agents
+localrecall.<ip>.sslip.io  /api/collections -> ["k8s-probe"]
+```
+
+Then the real check — `scripts/verify-stack.sh --agent coordinator` with all three `*_URL`
+variables pointed at the ingress hostnames. **All seven layers passed**, including the full
+ingest → chunk → embed → store → search round trip and a 2 s agent request. That is the first
+time the stack has been exercised the way a user outside the cluster would reach it.
+
+### A claim in the handbook was too strong
+
+`docs/06-deployment/kubernetes.md` framed the ingress read timeout as a general hazard: agent
+requests take longer than 60 s, ingress controllers default to 60 s, so requests get cut off and
+look like agent failures. Correct for ingress-nginx. **Wrong as a universal claim.**
+
+Trying to demonstrate it failed to produce the symptom:
+
+| Attempt | Result |
+|---|---|
+| 4000-token essay | 36 s, `finish_reason: stop` |
+| 7000-token forced output | 24 s (~290 tok/s) |
+| Cross-model delegated agent request | 18 s |
+
+Nothing on this hardware would run past 60 s — the GPU is too fast, which is a good problem to
+have and a bad one for testing a timeout. So the question moved from measurement to Traefik's
+documented defaults:
+
+| Setting | Default | What it actually covers |
+|---|---|---|
+| `respondingTimeouts.readTimeout` | 60 s | reading the **request** — irrelevant for a small JSON body |
+| `respondingTimeouts.writeTimeout` | **0 — unlimited** | writing the **response**; this is the one that would cut off a slow backend |
+| `respondingTimeouts.idleTimeout` | 180 s | idle keep-alive connections |
+
+So **Traefik does not cut off a slow agent request by default**, and the "raise the timeout" advice
+is ingress-nginx-specific. The page now carries a two-row table naming which controller needs the
+change and which does not, and states plainly that beyond 60 s rests on the documented default
+rather than on our measurement.
+
+The generalisable lesson is smaller than the timeout: `readTimeout` and `writeTimeout` sound
+interchangeable and are not. A reader tuning `readTimeout` to fix a truncated response would
+change nothing and conclude the setting was ignored.
+
+### Publishing all three is a security decision, not a convenience
+
+Applying the file exposes, unauthenticated:
+
+| Service | What the ingress grants |
+|---|---|
+| LocalAI | model install and **delete** via `/models/apply`, `/models/delete` |
+| LocalRecall | collection read **and write** — knowledge-base poisoning, which the agent then reads as fact |
+| LocalAGI | agent creation — **remote code execution** if `shell-command` is available |
+
+The narrow choice is LocalAGI only; the other two are reachable in-cluster by service name and do
+not need to be published. The file publishes all three because that is what was asked for and what
+was tested, with the trade-off stated in a header block.
+
+Enabling the services' own API keys is **not** the mitigation here — pass 4 established that it
+breaks every probe. So `kubernetes/07-ingress-basic-auth.yaml` adds a Traefik `Middleware` with
+`basicAuth` instead, which sits in front of the ingress and leaves probes untouched. It contains
+no credential; the secret is generated with `htpasswd -nbB`. The middleware reference is commented
+out in the Ingress, because an annotation naming a middleware that does not exist would 404 every
+request.
+
+One trap worth stating: the annotation value needs the provider suffix,
+`localai-stack-basic-auth@kubernetescrd`. Get the namespace or the suffix wrong and Traefik does
+not error — it ignores the middleware and serves the route unauthenticated. Which is the same
+shape as defect 2 from pass 4 and as the `agents.example.com` host above: **the security control
+that was silently not applied looks exactly like the one that was.**
+
+### Still not validated after pass 8
+
+| Configuration | Status |
+|---|---|
+| ROCm, Intel SYCL, Vulkan, Metal | only CUDA 12 hardware available |
+| Multi-GPU, or more than one GPU pod | one device in the cluster |
+| stdio MCP transport | needs a runtime in the image or a static binary |
+| MCP with a bearer token, or a side-effecting MCP server | not executed |
+| Delegation cycles | not tested, deliberately |
+| A request longer than 60 s through an ingress | GPU too fast to produce one; 36 s is the maximum reached |
+| TLS on the ingress | HTTP only; no certificate issuer in the cluster |
+| The basic-auth middleware in use | manifest validated with `--dry-run`, never enabled |
+| Backup and restore | documented, never executed |
+| Multiple replicas of anything | LocalAGI is a singleton by design |
+
 ## Open questions
 
 1. What populates `/api/traces/summary`? It stayed at zero throughout.
