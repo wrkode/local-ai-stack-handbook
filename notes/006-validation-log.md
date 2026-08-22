@@ -1207,6 +1207,170 @@ that was silently not applied looks exactly like the one that was.**
 | Backup and restore | documented, never executed |
 | Multiple replicas of anything | LocalAGI is a singleton by design |
 
+## Pass 9: Pattern A — retrieval inside LocalAI
+
+Date: 2026-08-22. Prompted by a direct question: chat in LocalAI and have it use the
+collections already in LocalRecall. The answer turned out to be no, for a reason worth the
+whole pass.
+
+### Reading `--help` first settled the architecture
+
+Before touching anything, `local-ai run --help` on the running v4.8.2 container. The `agents`
+flag group is the answer:
+
+```text
+--agent-pool-vector-engine="chromem"
+--agent-pool-embedding-model="granite-embedding-107m-multilingual"
+--agent-pool-database-url=STRING
+--agent-pool-collection-db-path=STRING
+--agent-pool-max-chunking-size=400
+--agent-pool-chunk-overlap=0
+```
+
+Every one of those is a LocalRecall configuration knob with a prefix. LocalAI links
+LocalRecall as a library; it does not call it. Grepping the full help for `localrag`,
+`recall`, `rag-url` and `remote` returned nothing.
+
+So the initial answer was: not possible, choose a pattern. That answer was right, but I
+nearly abandoned it for the wrong reason — see below.
+
+### The per-agent field that reopened and then closed the question
+
+With the pool enabled, `GET /api/agents/{name}/config` returns 57 fields, two of which are
+`local_rag_url` and `local_rag_api_key`. That looks like exactly the missing capability, at
+agent scope rather than server scope.
+
+It is not. Setting it to the live LocalRecall service returned `201`, and reading the config
+back showed the value stored. Three observations killed it:
+
+```text
+INFO Starting agent name="k8s-probe" config=&{... http://localrecall:8080 ...}
+INFO Chromem collection collectionName="k8s-probe" dbPath="/data/collections"
+```
+
+A **local** chromem store, initialised with the remote URL present in the very same config
+dump. Then the standalone LocalRecall's access log across the entire window — every entry
+`curl/8.7.1` or a browser, none from the agent. Not a failed request; no request.
+
+The confirming test was the one that made it certain. The question
+*"What heartbeat interval does the Zeppelin-7 telemetry bus use?"* — a synthetic fact present
+only in LocalRecall's `k8s-probe` collection — got:
+
+```text
+I do not have access to specific information about the heartbeat interval used by the
+Zeppelin-7 telemetry bus.
+```
+
+Uploading the identical sentence into **LocalAI's own** `k8s-probe` collection, changing
+nothing else, produced:
+
+```text
+The Zeppelin-7 telemetry bus uses a heartbeat interval of 4200 milliseconds.
+```
+
+The field is inherited from the shared LocalAGI agent config struct, where it is honoured.
+Same shape as the LocalAGI defect where embeddings do not follow `api_url`.
+
+The lesson generalises past this field: **in this codebase a URL that is accepted and stored
+is not evidence that anything reads it.** Two of the three checks above were cheap — read the
+log at agent start, read the *target's* access log. Neither requires understanding the code.
+Checking the callee's log for the absence of a call is the highest-value verification here,
+because a silently-ignored config produces no error anywhere on the caller's side.
+
+An absent option would have been better. An absent option makes you find another way.
+
+### The empty-KB failure is invisible
+
+Before seeding the collection, every answer was a confident denial. The cause:
+
+```text
+INFO Error finding similar strings inside KB: error=nResults must be <= the number of
+     documents in the collection
+INFO [Knowledge Base Lookup] No similar strings found in KB agent="k8s-probe"
+```
+
+`chromem` errors rather than clamping when `kb_results` exceeds the document count — and an
+empty collection has zero documents, so *any* `kb_results` fails. Both lines are **INFO**.
+Nothing at ERROR, HTTP 200 throughout, and the model denies knowledge fluently.
+
+This is the third time in this project that a retrieval failure has been logged at INFO. It
+is a consistent property of the stack, not an accident, and it is why
+`verify-stack.sh` asserts on a sentinel string rather than on a status code.
+
+### Two defects in my own manifests
+
+**`/data` was never mounted.** `--data-path` defaults to `/data` and holds `collectiondb`,
+agent state, tasks and jobs. The base manifest mounted `/models` and `/backends` only, so
+every collection ingested into LocalAI would have been discarded on the next rollout — with
+no error, and only after someone had done the ingestion work. Added `localai-data` as a PVC.
+Note this was latent in Pattern B too; enabling agents merely made it reachable.
+
+**The overlay patch did not apply.** First attempt:
+
+```text
+The Deployment "localai" is invalid: spec.template.spec.containers[0].env[0].valueFrom:
+Invalid value: "": may not be specified when `value` is not empty
+```
+
+`LOCALAI_DISABLE_AGENTS` comes from a ConfigMap in the base. A strategic-merge patch merges
+`env` by name, so it keeps `valueFrom` and adds `value` beside it. `valueFrom: null` in the
+same patch deletes the reference. Generalisable: you cannot override a `configMapKeyRef` with
+a literal by merging over it.
+
+### The API is its own thing
+
+Established by probing, because `/swagger/doc.json` documents only `/api/agent/tasks` and
+`/api/agent/jobs` — the pool CRUD is entirely undocumented.
+
+```text
+GET    /api/agents                            summary object, NOT a list
+POST   /api/agents                            create -> 201
+PUT    /api/agents/{name}                     update
+GET    /api/agents/{name}/config              57 fields
+GET    /api/agents/collections
+POST   /api/agents/collections
+DELETE /api/agents/collections?name=X         query param; path form is 404
+POST   /api/agents/collections/{c}/upload     multipart
+GET    /api/agents/collections/{c}/entries    GET only; POST is 404
+POST   /api/agents/collections/{c}/search
+```
+
+The prefix is `/api/agents/collections`, so it collides with neither LocalRecall's
+`/api/collections` nor LocalAGI's routes. And the envelopes differ from LocalRecall's
+`{"success":..,"data":{..}}` — the two are **not** wire-compatible, which matters to anyone
+expecting to repoint a client when migrating patterns.
+
+Attempting agent creation by guessing cost several rounds. Reading the config of an
+already-created agent was what actually worked, and `POST /api/agents` → 201 with
+`PUT /api/agents/{name}` for update was found by testing the two obvious REST shapes rather
+than by reading the SPA bundle, which turned out to serve the index fallback for its own
+asset paths.
+
+### Working result
+
+Agent named for its collection, `enable_kb` + `kb_auto_search` + `kb_results: 1`, answering
+from LocalAI's own store in **53 s cold** including the embedding backend load. No LocalAGI
+and no LocalRecall in the request path. Procedure in `kubernetes/pattern-a/README.md`.
+
+### Still not validated after pass 9
+
+| Configuration | Status |
+|---|---|
+| ROCm, Intel SYCL, Vulkan, Metal | only CUDA 12 hardware available |
+| Multi-GPU, or more than one GPU pod | one device in the cluster |
+| stdio MCP transport | needs a runtime in the image or a static binary |
+| MCP with a bearer token, or a side-effecting MCP server | not executed |
+| LocalAI's agent pool on the `postgres` vector engine | only `chromem` exercised |
+| One database shared by LocalAI's pool and a standalone LocalRecall | not executed — risks a schema migration under the other process |
+| LocalRecall wrapped as an MCP server | proposed, not built |
+| `kb_as_tools` instead of `kb_auto_search` | not executed |
+| Embedded knowledge layer on **LocalAGI** | still absent from v2.8.1 |
+| Delegation cycles | not tested, deliberately |
+| A request longer than 60 s through an ingress | GPU too fast; 36 s is the maximum reached |
+| TLS on the ingress, and the basic-auth middleware in use | not executed |
+| Backup and restore | documented, never executed |
+| Multiple replicas of anything | LocalAGI is a singleton by design |
+
 ## Open questions
 
 1. What populates `/api/traces/summary`? It stayed at zero throughout.
@@ -1218,3 +1382,8 @@ that was silently not applied looks exactly like the one that was.**
    actually provide? It suggests more than a shared bearer key and is undocumented in the
    material reviewed.
 6. Does `vectorscale`'s presence mean DiskANN indexes are used, or merely available?
+7. Is `local_rag_url` dead everywhere in LocalAI, or honoured on some path not exercised
+   here — a connector, a task, the skills service? Only the agent conversation path was
+   tested.
+8. Does `LOCALAI_AGENT_POOL_DATABASE_URL` produce a schema compatible with standalone
+   LocalRecall v0.6.4, or does one migrate the other's tables?

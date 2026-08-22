@@ -31,6 +31,64 @@ embedded knowledge layer and gain hybrid search without adding a LocalRecall
 service. People routinely conflate these and add two components when they needed
 one.
 
+## Pattern A cannot read a Pattern B knowledge base
+
+This is the constraint that decides whether the two patterns can coexist, so it
+comes before the cost tables.
+
+LocalAI v4.8.2 embeds LocalRecall as a **library**. Its agent-pool configuration is
+storage-level throughout — there is no remote-server option:
+
+| `LOCALAI_AGENT_POOL_*` | Equivalent LocalRecall variable |
+|---|---|
+| `VECTOR_ENGINE` | `VECTOR_ENGINE` |
+| `EMBEDDING_MODEL` | `EMBEDDING_MODEL` |
+| `DATABASE_URL` | `DATABASE_URL` |
+| `COLLECTION_DB_PATH` | `COLLECTION_DB_PATH` |
+| `MAX_CHUNKING_SIZE` | `MAX_CHUNKING_SIZE` |
+| `CHUNK_OVERLAP` | `CHUNK_OVERLAP` |
+
+Compare the two runtimes on the one question that matters:
+
+| Runtime | Can point at a remote LocalRecall? | How |
+|---|---|---|
+| LocalAGI | **yes** | `LOCALAGI_LOCALRAG_URL` — empty selects the embedded base |
+| LocalAI | **no** | no flag exists; `local_rag_url` on the agent is accepted and ignored |
+
+!!! danger "`local_rag_url` is a field that does nothing"
+    LocalAI's per-agent config includes `local_rag_url`. It accepts a URL, returns
+    `201`, and persists the value — and has no effect. Tested three ways: LocalAI
+    logs `Chromem collection ... dbPath="/data/collections"` at agent start with the
+    URL set; the target LocalRecall's access log recorded **zero** requests from the
+    agent across the whole test; and the same question that failed answered
+    correctly once the identical sentence was uploaded to LocalAI's *own* collection.
+
+    The field is inherited from the shared LocalAGI agent config struct, where it
+    works. This is the same shape as the LocalAGI defect where embeddings do not
+    follow `api_url`: **a populated URL field in this codebase is not evidence that
+    anything reads it.**
+
+So "chat in LocalAI, retrieve from my existing LocalRecall" is not a configuration
+you can reach. The three ways out, in the order worth trying:
+
+| Approach | Cost | Status |
+|---|---|---|
+| Chat in LocalAGI instead | none — `LOCALAGI_LOCALRAG_URL` already does this | **tested** |
+| Re-ingest into LocalAI's own collections | duplicate storage and ingestion | **tested**, see [`kubernetes/pattern-a/`](https://github.com/wrkode/local-ai-stack-handbook/tree/main/kubernetes/pattern-a) |
+| Point both at one PostgreSQL database | two processes migrating one schema | **untested** |
+| Wrap LocalRecall as an MCP server | write and run a shim | **untested** |
+
+The shared-database route is the tempting one and the one to be careful with. Both
+sides embed the same library, so the schema *should* match — but two pods running
+different library versions against one database can migrate it under each other.
+Test it against a scratch database, never the one holding collections you want.
+
+The migration direction that does work cleanly is B → A by re-ingestion, because
+`LOCALAI_AGENT_POOL_EMBEDDING_MODEL` defaults to
+`granite-embedding-107m-multilingual` — the same default LocalRecall uses. Leave it
+alone and the vectors are comparable. Change it on either side and every stored
+collection returns confident nonsense, with nothing in the log.
+
 ## What each split costs
 
 Measured or source-verified, not estimated.

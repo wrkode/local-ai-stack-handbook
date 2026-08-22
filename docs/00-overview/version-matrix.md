@@ -379,6 +379,19 @@ tested:
 | 94 | Whether Traefik cuts off a slow agent request | k0s, Traefik | **it does not** | `writeTimeout` — the setting that governs a slow response — defaults to **`0`, unlimited**. `readTimeout` 60 s covers reading the request only. **Documented, not tested past 36 s** |
 | 95 | `nginx.ingress.kubernetes.io/*` annotations on Traefik | k0s, Traefik | **silently ignored** | no warning, no event; an ignored annotation is indistinguishable from a working one |
 | 96 | `basicAuth` Traefik `Middleware` manifest | k0s, Traefik | **schema valid, not enabled** | `middlewares.traefik.io` CRD present, `--dry-run=client` passed; never put in front of a live route |
+| 97 | LocalAI agent pool enabled (`LOCALAI_DISABLE_AGENTS=false`) | k0s, GPU | **pass** | `/api/agents` 200 where it was 404; `actions: 40`, `connectors: 9` |
+| 98 | Agent-pool route prefix | k0s | **`/api/agents/collections`** | **not** `/api/collections` — collides with neither LocalRecall's nor LocalAGI's API |
+| 99 | Agent-pool routes in `/swagger/doc.json` | k0s | **absent** | swagger documents only `/api/agent/tasks` and `/api/agent/jobs`; pool CRUD is undocumented |
+| 100 | `GET /api/agents` response shape | k0s | **summary, not a list** | `{"agentCount":1,"agents":[...],"actions":40,"connectors":9}` — LocalAGI returns an array |
+| 101 | Collection create / upload / search in LocalAI | k0s, GPU | **pass** | create 201; multipart upload 200; search returned similarity **0.693** |
+| 102 | LocalAI vs LocalRecall response envelope | k0s | **not wire-compatible** | `{"collections":[..],"count":1}` vs `{"success":true,"data":{...}}` |
+| 103 | `DELETE` a LocalAI collection | k0s | **query param only** | `?name=X` → 200; `/collections/X` → 404 |
+| 104 | How an agent selects its collection | k0s | **by agent name** | no collection field in the 57-field config; agent `handbook` reads collection `handbook` |
+| 105 | Agent answering from LocalAI's own knowledge | k0s, GPU | **pass** | correct retrieval of a synthetic sentinel, **53 s cold** including embedding-backend load |
+| 106 | `local_rag_url` on a LocalAI agent | k0s, GPU | **accepted and SILENTLY IGNORED** | value persists; LocalAI logs `Chromem collection ... dbPath="/data/collections"` anyway; target LocalRecall logged **zero** requests; seeding LocalAI's own collection fixed the answer |
+| 107 | `kb_results` > document count on `chromem` | k0s | **hard error, logged at INFO** | `nResults must be <= the number of documents in the collection` → `No similar strings found in KB` → a confident "I do not know" with nothing at ERROR |
+| 108 | `/data` unmounted in the base manifest | k0s | **defect found and fixed** | `--data-path` holds `collectiondb`, agent state, tasks, jobs; it was the container's writable layer, so ingestion was discarded on every rollout |
+| 109 | Strategic-merge patch over a `configMapKeyRef` | k0s | **rejected without an explicit null** | `env[0].valueFrom: Invalid value: "": may not be specified when 'value' is not empty`; `valueFrom: null` in the same patch fixes it |
 
 ### A reproduced failure worth knowing
 
@@ -417,7 +430,7 @@ Recorded honestly, because the gaps matter:
 | Configuration | Status |
 |---|---|
 | LocalAGI **v2.9.0** in any form | **not executed** — no published image; not built from source |
-| Embedded (in-process) knowledge layer | **not executed** — absent from v2.8.1; v2.9.0 source only |
+| Embedded (in-process) knowledge layer | **tested on LocalAI v4.8.2** (rows 97-107). Still not executed on *LocalAGI*, where it is absent from v2.8.1 |
 | LocalAGI's `/api/collections` API | **not executed** — absent from v2.8.1 |
 | Standalone LocalRecall with `chromem` engine | **not executed** — only `postgres` was exercised |
 | Hybrid search weight tuning, BM25 behaviour | **not executed** — the engine was used, the weights were not varied |
@@ -427,7 +440,9 @@ Recorded honestly, because the gaps matter:
 | Distributed llama.cpp (`LLAMACPP_GRPC_SERVERS`) | **not executed** — the binary is present in the bundle |
 | `/v1/messages`, `/v1/rerank`, and the face/voice/vision endpoints | **not exercised** — routes confirmed present only |
 | Distributed mode (NATS + PostgreSQL) | **not executed** |
-| Pattern A with agents enabled *and* knowledge | **not executed** |
+| Pattern A with agents enabled *and* knowledge | **tested** — rows 97-107, [`kubernetes/pattern-a/`](https://github.com/wrkode/local-ai-stack-handbook/tree/main/kubernetes/pattern-a) |
+| LocalAI's agent pool on the `postgres` vector engine | **not executed** — only `chromem` was exercised |
+| One PostgreSQL database shared by LocalAI's pool and a standalone LocalRecall | **not executed** — risks a schema migration running under the other process |
 | TLS on the ingress | **not executed** — HTTP only; no certificate issuer in the cluster |
 | The basic-auth middleware actually in front of a route | **not executed** — manifest validated, never enabled |
 | A request longer than 60 s through an ingress | **not achievable here** — the GPU answers too fast; 36 s was the maximum |

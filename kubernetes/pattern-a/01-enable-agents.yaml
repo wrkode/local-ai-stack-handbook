@@ -1,0 +1,86 @@
+# Pattern A — LocalAI's own agent pool and knowledge base.
+#
+# The base manifests deploy Pattern B: three processes, retrieval over HTTP to a
+# standalone LocalRecall. This overlay turns on LocalAI's *embedded* agent pool,
+# which brings its own in-process knowledge base with it.
+#
+# APPLY THIS ONLY IF YOU UNDERSTAND WHAT IT DOES NOT DO
+#
+# LocalAI has no option to point at a remote LocalRecall. Its agent-pool flags
+# are storage-level (vector engine, embedding model, database URL, collection
+# path) because it links LocalRecall as a library rather than calling it. So
+# after this, LocalAI has collections of its OWN, empty, with no relationship to
+# anything already in your standalone LocalRecall. You must re-ingest.
+#
+# Compare LOCALAGI_LOCALRAG_URL, which does select a remote server. LocalAI has
+# no equivalent. Verified against v4.8.2 `local-ai run --help`.
+#
+# Requires the localai-data PVC from ../04-localai.yaml. Without a persisted
+# /data, every collection you ingest is discarded on the next rollout.
+#
+#   kubectl apply -f ../04-localai.yaml                     # adds the /data PVC
+#   kubectl -n localai-stack patch deployment localai \
+#     --patch-file 01-enable-agents.yaml
+#
+# PATCH, not apply. This is a partial Deployment: `kubectl apply -f` on it would
+# prune every field the base manifest sets and this file omits — image, ports,
+# probes, volumeMounts. A strategic-merge patch merges the env list by name.
+#
+# To revert: patch LOCALAI_DISABLE_AGENTS back to "true". The routes disappear;
+# the collections stay on the PVC.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localai
+  namespace: localai-stack
+spec:
+  template:
+    spec:
+      containers:
+        - name: localai
+          env:
+            # The base manifest sources this from localai-stack-config, where it
+            # is "true". A strategic-merge patch merges env entries by name, so
+            # it KEEPS that valueFrom and adds `value` beside it — which the API
+            # server rejects:
+            #
+            #   env[0].valueFrom: Invalid value: "":
+            #   may not be specified when `value` is not empty
+            #
+            # The explicit null deletes the configMapKeyRef. Without it this
+            # patch does not apply at all.
+            - name: LOCALAI_DISABLE_AGENTS
+              valueFrom: null
+              value: "false"
+
+            # Model the agent pool uses when an agent does not name one.
+            # Must exist in /v1/models or every agent request fails while the
+            # pod stays Ready.
+            - name: LOCALAI_AGENT_POOL_DEFAULT_MODEL
+              value: "qwen3-1.7b"
+
+            # Vectors are only comparable to vectors from the SAME model.
+            # This is already the upstream default; it is pinned here because
+            # changing it after ingestion makes every stored collection return
+            # confident nonsense, with nothing in the log.
+            - name: LOCALAI_AGENT_POOL_EMBEDDING_MODEL
+              value: "granite-embedding-107m-multilingual"
+
+            # chromem is a file under /data — hence the PVC requirement.
+            # Set to "postgres" plus LOCALAI_AGENT_POOL_DATABASE_URL to use a
+            # database instead. Pointing it at the database a standalone
+            # LocalRecall already owns is UNTESTED and risks a schema migration
+            # running under the other process.
+            - name: LOCALAI_AGENT_POOL_VECTOR_ENGINE
+              value: "chromem"
+
+            # Matches the standalone LocalRecall's settings so retrieval
+            # behaviour is comparable between the two patterns.
+            - name: LOCALAI_AGENT_POOL_MAX_CHUNKING_SIZE
+              value: "400"
+            - name: LOCALAI_AGENT_POOL_CHUNK_OVERLAP
+              value: "80"
+
+            # Off by default; agent runs are otherwise hard to debug.
+            - name: LOCALAI_AGENT_POOL_ENABLE_LOGS
+              value: "true"

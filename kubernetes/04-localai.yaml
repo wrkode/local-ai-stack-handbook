@@ -20,6 +20,19 @@ spec:
   resources: { requests: { storage: 5Gi } }
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localai-data
+  namespace: localai-stack
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # --data-path (default /data) holds collectiondb, agent state, tasks and jobs.
+  # Unmounted it lands in the container's writable layer, so every rollout
+  # silently discards it. Small unless you enable the agent pool and ingest
+  # documents into LocalAI's own collections — see pattern-a/.
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: localai
@@ -72,6 +85,7 @@ spec:
           volumeMounts:
             - { name: models, mountPath: /models }
             - { name: backends, mountPath: /backends }
+            - { name: data, mountPath: /data }
           # /readyz reports the LISTENER, not models. Reproduced: with the model
           # gallery rate-limited, both installs failed and /readyz still returned
           # 200 with ZERO models. So: /readyz for liveness, /v1/models for
@@ -128,3 +142,5 @@ spec:
           persistentVolumeClaim: { claimName: localai-models }
         - name: backends
           persistentVolumeClaim: { claimName: localai-backends }
+        - name: data
+          persistentVolumeClaim: { claimName: localai-data }
