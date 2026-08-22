@@ -713,7 +713,7 @@ probe credentials, node resource ceilings.
 The operator installed the NVIDIA device plugin path with us. This closed the last major gap and
 produced **three more prerequisite failures**, each with a distinct and initially misleading error.
 
-Node: `grogu`, bare metal amd64, Quadro RTX 6000 24 GB, driver 590.44.01, k0s v1.34.3.
+Node: `gpu-node`, bare metal amd64, Quadro RTX 6000 24 GB, driver 590.44.01, k0s v1.34.3.
 
 ### Four prerequisites, not two
 
@@ -1091,15 +1091,15 @@ accepted is not evidence the thing works.**
 
 ### sslip.io removes the DNS prerequisite
 
-The cluster convention is `*.lab.k8` with a **per-host** record, not a wildcard —
-`grafana.lab.k8` resolved, `localai.lab.k8` did not. So testing the ingress required either
+The cluster's internal zone uses **per-host** records, not a wildcard — hosts already in it
+resolved, a newly chosen `localai.<zone>` did not. So testing the ingress required either
 editing a DNS zone or editing `/etc/hosts`, neither of which belongs in a handbook manifest.
 
 The fix was to give every Ingress **two** hostnames:
 
 ```yaml
   rules:
-    - host: localai.lab.k8
+    - host: localai.example.com
       http: &localai_backend
         paths:
           - path: /
@@ -1109,7 +1109,7 @@ The fix was to give every Ingress **two** hostnames:
                 name: localai
                 port:
                   number: 8080
-    - host: localai.172.16.56.153.sslip.io
+    - host: localai.192.0.2.10.sslip.io
       http: *localai_backend
 ```
 

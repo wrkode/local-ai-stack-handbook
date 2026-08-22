@@ -243,7 +243,7 @@ tested:
     environment:
       platform: kubernetes
       distribution: k0s v1.34.3
-      node: grogu — bare metal amd64, NVIDIA Quadro RTX 6000 24 GB, driver 590.44.01
+      node: gpu-node — bare metal amd64, NVIDIA Quadro RTX 6000 24 GB, driver 590.44.01
       container_runtime: containerd + nvidia-container-toolkit 1.18.1, RuntimeClass nvidia
       backend: cuda12-llama-cpp (1.8 GiB, installed on first run)
     result: >-
@@ -341,14 +341,14 @@ tested:
 | 56 | nginx ingress annotations on Traefik | k0s, Traefik | **silently ignored** | Traefik has **no per-Ingress read-timeout annotation**; needs static config or a `ServersTransport` CRD |
 | 57 | Device plugin on a stock k0s worker | k0s v1.34.3 | **fail** | `no runtime for "nvidia" is configured`. `/etc/k0s/containerd.d/` is **empty by default**; Docker's toolkit config does not touch k0s's containerd. |
 | 58 | containerd drop-in with `SystemdCgroup = true` | k0s | **fail** | runtime lookup succeeded, then runc: `expected cgroupsPath to be of format "slice:prefix:name" … got "/kubepods/besteffort/…"`. **k0s uses cgroupfs** — must be `false`. |
-| 59 | Device plugin v0.19.3 after both fixes | k0s, grogu | **pass** | `1/1 Running`; `nvidia.com/gpu` capacity=1 allocatable=1; logs `Registered device plugin for 'nvidia.com/gpu' with Kubelet` |
+| 59 | Device plugin v0.19.3 after both fixes | k0s, gpu-node | **pass** | `1/1 Running`; `nvidia.com/gpu` capacity=1 allocatable=1; logs `Registered device plugin for 'nvidia.com/gpu' with Kubelet` |
 | 60 | First GPU deployment with liveness probe only | k0s | **fail** | CUDA backend is **1.8 GiB** and downloads **before** the HTTP listener starts, so `/readyz` refuses connections and liveness killed it at ~120 s — **5 restarts**, download restarting from zero each time. |
 | 61 | Same, with a `startupProbe` added | k0s | **pass** | Ready in ~3 min, **zero restarts**. The CPU backend fits inside the liveness window, so this defect appears **only** on first GPU deployment. |
-| 62 | CUDA backend auto-selected in Kubernetes | k0s, grogu | **pass** | `/backends` → `cuda12-llama-cpp`; log `capability="nvidia-cuda-12"` |
-| 63 | VRAM attributed to the pod's backend process | k0s, grogu | **pass** | **2194 MiB** against `/backends/cuda12-llama-cpp/lib/ld.so`; reads 0 MiB until the first request (lazy backend start) |
-| 64 | GPU vs CPU, 200-token completion, same node/model/prompt | k0s, grogu | **pass** | CPU **6.67 / 6.78 s** (~30 tok/s) → GPU **1.41 / 1.50 s** (~142 tok/s) = **~4.5x** |
-| 65 | GPU vs CPU, agent with knowledge and a tool | k0s, grogu | **pass** | **23.7 s → 2.12 s ≈ 11x.** Corrected an earlier claim that a GPU helps agent latency "only partly". |
-| 66 | All 7 verify-stack layers on GPU | k0s, grogu | **pass** | agent request 4 s |
+| 62 | CUDA backend auto-selected in Kubernetes | k0s, gpu-node | **pass** | `/backends` → `cuda12-llama-cpp`; log `capability="nvidia-cuda-12"` |
+| 63 | VRAM attributed to the pod's backend process | k0s, gpu-node | **pass** | **2194 MiB** against `/backends/cuda12-llama-cpp/lib/ld.so`; reads 0 MiB until the first request (lazy backend start) |
+| 64 | GPU vs CPU, 200-token completion, same node/model/prompt | k0s, gpu-node | **pass** | CPU **6.67 / 6.78 s** (~30 tok/s) → GPU **1.41 / 1.50 s** (~142 tok/s) = **~4.5x** |
+| 65 | GPU vs CPU, agent with knowledge and a tool | k0s, gpu-node | **pass** | **23.7 s → 2.12 s ≈ 11x.** Corrected an earlier claim that a GPU helps agent latency "only partly". |
+| 66 | All 7 verify-stack layers on GPU | k0s, gpu-node | **pass** | agent request 4 s |
 | 67 | LocalAGI image runtimes for stdio MCP | k0s | **fail — none present** | `node`, `npx`, `python3`, `uvx` all MISSING in v2.8.1. The `npx`/`uvx` reference-server ecosystem cannot run as a stdio child as shipped. |
 | 68 | `ghcr.io/sparfenyuk/mcp-proxy:v0.12.0` wrapping `uvx mcp-server-time` | k0s | **fail** | `FileNotFoundError: [Errno 2] No such file or directory: 'uvx'` — that image does not bundle `uv` either |
 | 69 | `mcp-proxy` + `mcp-server-time` on a `python:3.13-slim` base | k0s | **pass** | serves SSE at `/sse`; resolved mcp-proxy 0.12.0, mcp-server-time 2026.8.18 |
@@ -370,7 +370,7 @@ tested:
 | 85 | Three models resident simultaneously | k0s, GPU | **pass** | qwen3-1.7b 2202 MiB + granite 234 MiB + qwen3-4b 4850 MiB = **7294 MiB**, no eviction |
 | 86 | Shipped `07-ingress.yaml` as written | k0s, Traefik | **unusable** | host was the placeholder `agents.example.com` and every annotation was `nginx.ingress.kubernetes.io/*`; the object still reported an address |
 | 87 | Ingress via `*.<ip>.sslip.io` host | k0s, Traefik | **pass** | resolves through public DNS with no zone edit; makes an ingress testable the moment it is applied |
-| 88 | Dual-host Ingress via a YAML anchor | k0s, Traefik | **pass** | one backend definition serving both `<svc>.lab.k8` and the sslip.io host |
+| 88 | Dual-host Ingress via a YAML anchor | k0s, Traefik | **pass** | one backend definition serving both `<svc>.example.com` and the sslip.io host |
 | 89 | LocalAI through the ingress | k0s, Traefik | **pass** | `/readyz` 200, `/v1/models` → 3 models, `/system` → 3 backends loaded |
 | 90 | LocalAGI through the ingress | k0s, Traefik | **pass** | `/api/agents` → 6 agents; `/v1/responses` answered |
 | 91 | LocalRecall through the ingress | k0s, Traefik | **pass** | `/api/collections` → `["k8s-probe"]` |

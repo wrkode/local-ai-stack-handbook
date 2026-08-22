@@ -161,6 +161,38 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+head_ "No lab-specific addresses or hostnames"
+# The handbook is validated against a real cluster, so real addresses reach the
+# drafts. Observed output that is genuinely scoped to its own cluster is kept as
+# evidence; anything that identifies a routable entry point is not.
+#
+# Allowed: loopback, wildcard bind, RFC 5737 documentation ranges, and the
+# specific pod/service/bridge CIDRs whose addresses appear in captured output.
+# Everything else in RFC 1918 is flagged — including any new one.
+leaked=$(grep -rnIoE '\b(10|172|192)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b' \
+           docs notes kubernetes compose examples scripts 2>/dev/null \
+         | grep -vE ':(127\.0\.0\.1|10\.244\.|10\.96\.|172\.18\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)' \
+         | grep -vE '\b(10|172|192)\.[0-9]+\.[0-9]+ ' || true)
+if [ -n "$leaked" ]; then
+  fail_ "private-range address outside the allowed set — anonymize it"
+  printf '%s\n' "$leaked" | head -20
+  printf '        %s\n' "use 192.0.2.x (RFC 5737) for examples"
+else
+  pass_ "no unexpected private-range addresses"
+fi
+
+# Reserved names only. A real internal zone in a public repo maps the network.
+badhost=$(grep -rnIoE '\b[a-z0-9][a-z0-9-]*\.(k8|lan|corp|intra|internal)\b' \
+            docs notes kubernetes compose examples scripts 2>/dev/null \
+          | grep -vE 'docker\.internal' || true)
+if [ -n "$badhost" ]; then
+  fail_ "internal hostname or zone found — use example.com (RFC 2606)"
+  printf '%s\n' "$badhost" | head -20
+else
+  pass_ "no internal hostnames or DNS zones"
+fi
+
+# ---------------------------------------------------------------------------
 head_ "Content files are tracked by git"
 # ---------------------------------------------------------------------------
 # The link checker reads the WORKING TREE, so a file that exists locally but was
