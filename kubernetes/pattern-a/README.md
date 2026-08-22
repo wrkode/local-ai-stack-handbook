@@ -130,6 +130,115 @@ Observed: 53 s cold on a Quadro RTX 6000, including the embedding backend load.
 retrieval a tool the model chooses to call — cheaper, but it will sometimes decline
 to look.
 
+## Binding an agent to a collection
+
+There is **no way to point an agent at a collection of your choosing.** The 57-field
+config has no collection reference, and the agent form in the WebUI contains no
+collection control at all — zero occurrences of the word.
+
+The binding is implicit: **an agent reads the collection named after itself,
+lowercased.**
+
+Verified with two canaries. An agent named `AutoResearchAgent`, with one document in
+a collection named `AutoResearchAgent` and a different document in
+`autoresearchagent`:
+
+```text
+[Knowledge Base Lookup] Found similar strings in KB agent="AutoResearchAgent"
+  results="- The lowercase canary is LOWERCASE-3390. (file_name:c-lower.txt ...)"
+```
+
+It read the **lowercase** one. Both exist as separate directories under
+`/data/assets/`, so the mixed-case collection is not an alias — it is a decoy that
+is created and then never read.
+
+This matters because the UI will happily create the mixed-case collection for you.
+Upload your documents into it and retrieval stays empty forever, with the
+`nResults` error below as the only clue.
+
+So to attach an existing collection to an agent, one of:
+
+| Approach | Cost |
+|---|---|
+| Name the agent after the collection, lowercased | none — the collection must already be lowercase |
+| Re-upload the documents into the agent's own lowercased collection | duplicate storage |
+| Rename the collection | **no rename API exists**, and delete is a no-op |
+
+The first is the only clean one. An agent named `vquasar` reads collection `vquasar`
+immediately, no copying — verified answering from a 3-document collection.
+
+## `long_term_memory` can crash the whole server
+
+The most serious thing found in this pass. With `long_term_memory` and
+`summary_long_term_memory` enabled, the agent writes each conversation back to its
+knowledge base, summarizing first. When the conversation exceeds the model's context
+the summarization fails — and the error path dereferences a nil pointer:
+
+```text
+INFO  Saving conversation agent="AutoResearchAgent" conversation size=4
+ERROR Error summarizing conversation error=rpc error: code = Internal desc =
+      request (14899 tokens) exceeds the available context size (8192 tokens)
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x10 pc=0xf9ab63]
+LocalAGI/core/agent.(*Agent).saveCurrentConversation
+    core/agent/knowledgebase.go:147
+```
+
+`saveCurrentConversation` at `knowledgebase.go:147`, reached from `consumeJob`. The
+process exits **2** and Kubernetes restarts the pod, so this is not one agent
+failing — **the entire LocalAI server goes down**, every model unloaded, every other
+agent interrupted. Reachable from an ordinary chat turn, after the answer has already
+been returned successfully.
+
+RAG makes it likelier, not less: retrieved chunks inflate the conversation, so a
+knowledge-backed agent reaches the context limit sooner than a bare one. Observed on
+a 4B model at 8192 context after **four** messages.
+
+Mitigations, in order of preference:
+
+| Fix | Effect |
+|---|---|
+| `summary_long_term_memory: false` | no summarization call, so the nil path is never reached |
+| `long_term_memory: false` | no write-back at all |
+| Raise the model's context in its YAML | postpones it; does not remove the bug |
+
+**Persist `/data` before you enable long-term memory.** Without the PVC this crash
+takes every agent and collection with it. With it, a crash mid-session lost nothing:
+three agents and six collections came back intact.
+
+## `can_stop_itself` turns answers into errors
+
+An agent with `can_stop_itself: true` may conclude the conversation instead of
+replying, which surfaces through `/v1/responses` as a server error rather than as a
+graceful ending:
+
+```text
+{"error":{"message":"interrupted via ToolCallCallback","type":"server_error"}}
+```
+
+Preceded in the log by the model's own reasoning — *"Since this query requires access
+to data I cannot provide, I must conclude the conversation."* Setting
+`can_stop_itself: false` produced a normal answer to the identical prompt with
+nothing else changed.
+
+Note the interaction with the `nResults` bug: an agent that cannot retrieve decides it
+lacks the data, stops itself, and returns a `server_error`. Two separate defects
+compounding into a symptom that looks like neither.
+
+## Ingest raw URLs, not rendered pages
+
+A collection built from GitHub *blob* URLs stores the page furniture, not the
+document. Retrieved chunks looked like:
+
+```text
+Breadcrumbs * vquasar / docs / prerequisites.md Copy path Blame More file actions
+Latest commit History Copy raw file Download raw file Outline Edit and raw actions
+```
+
+With `MAX_CHUNKING_SIZE=400`, navigation boilerplate consumes whole chunks and the
+answer degrades to naming the file it could not read. Ingest
+`raw.githubusercontent.com/...` rather than `github.com/.../blob/...`.
+
 ## The failure you will actually hit
 
 `kb_results` **must not exceed the number of documents in the collection.**
