@@ -209,6 +209,56 @@ Mitigations, in order of preference:
 takes every agent and collection with it. With it, a crash mid-session lost nothing:
 three agents and six collections came back intact.
 
+## Start with plain RAG, then add one feature at a time
+
+The agent config offers planning, guided tools, reasoning, a reasoning tool, skills,
+evaluation loops, auto-compaction, long-term memory and retry/loop counters. Each is
+a checkbox, so enabling all of them looks like configuration rather than risk. It is
+not: each adds prompt overhead on a fixed context budget and its own failure mode,
+and the failures do not name themselves.
+
+An agent with the full stack enabled on a 4B model at 8192 context failed three
+different ways in one session — `nResults` from `kb_results: 10`, `interrupted via
+ToolCallCallback` from `can_stop_itself`, and:
+
+```text
+ERROR Error executing cogito error=failed to execute planning:
+      failed to execute plan: no subtasks found in plan
+```
+
+None of those messages points at the flag responsible, and the last one fires before
+the model produces any answer at all.
+
+Reduced to plain retrieval — `enable_kb`, `kb_auto_search`, `kb_results` matched to
+the document count, everything else off — the same agent answered correctly in
+**4.9 s**, twice in a row, quoting two separate facts from a document it had never
+seen:
+
+```text
+[Knowledge Base Lookup] Found similar strings in KB agent="AutoResearchAgent"
+  results="- The vquasar control-plane bootstrap token rotates every 2700 seconds..."
+```
+
+That is the configuration to establish first, because it is the one whose failure
+mode you now recognise. Add features back individually and re-test, so that when
+something breaks you know which checkbox did it.
+
+Concretely, the flags to leave off until plain RAG is proven:
+
+```json
+{"enable_planning": false, "enable_guided_tools": false, "enable_reasoning": false,
+ "enable_reasoning_tool": false, "enable_skills": false, "can_stop_itself": false,
+ "long_term_memory": false, "summary_long_term_memory": false,
+ "enable_kb_compaction": false, "kb_as_tools": false, "standalone_job": false,
+ "max_attempts": 0, "max_evaluation_loops": 0, "loop_detection": 0}
+```
+
+`long_term_memory` deserves its own warning beyond the crash: its write-back files
+land in the **same collection** the agent retrieves from. They then compete with your
+documents for the `kb_results` slots, and every one of them changes the document
+count that `kb_results` must stay under. A knowledge base that was curated becomes a
+mixture of curated documents and the agent's own prior chatter, silently.
+
 ## `can_stop_itself` turns answers into errors
 
 An agent with `can_stop_itself: true` may conclude the conversation instead of

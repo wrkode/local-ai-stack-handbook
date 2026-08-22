@@ -408,6 +408,8 @@ tested:
 | 123 | `DELETE /api/agents/collections/{c}/entry/delete` | k0s | **pass — this is the working delete** | body `{"entry":"<uuid>/<file>"}`; returns `{"count":N,"remaining_entries":[...]}`. Also present: `POST .../reset` and `POST .../sources`. None are in swagger; found in the WebUI's API bundle |
 | 124 | `summary_long_term_memory: false` as the crash mitigation | k0s, GPU | **pass** | identical `Saving conversation ... conversation size=4` step, **no summarization request and no panic**. Removes the code path rather than postponing it |
 | 125 | `enable_planning` on a 4B model with RAG context | k0s, GPU | **fails the request** | `failed to execute planning: failed to execute plan: no subtasks found in plan`; two consecutive turns |
+| 126 | Plain RAG after disabling 10 advanced flags | k0s, GPU | **pass — 4.9 s** | same agent that had failed three different ways answered correctly twice in a row, quoting two facts from a sentinel document. Retrieval confirmed in the log |
+| 127 | `long_term_memory` write-back target | k0s, GPU | **the agent's own retrieval collection** | conversation files land beside your documents, compete for `kb_results` slots and change the count `kb_results` must stay under |
 
 ### A reproduced failure worth knowing
 
